@@ -80,6 +80,8 @@ func resourceKsyunLb() *schema.Resource {
 				ForceNew: true,
 			},
 
+			"tags": tagsSchema(),
+
 			"public_ip": {
 				Type:     schema.TypeString,
 				Computed: true,
@@ -99,6 +101,16 @@ func resourceKsyunLb() *schema.Resource {
 			},
 			"is_waf": {
 				Type:     schema.TypeBool,
+				Computed: true,
+			},
+			"access_logs_enabled": {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Computed: true,
+			},
+			"access_logs_s3_bucket": {
+				Type:     schema.TypeString,
+				Optional: true,
 				Computed: true,
 			},
 		},

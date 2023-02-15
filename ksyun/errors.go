@@ -28,26 +28,25 @@ func (err *ProviderError) Message() string {
 }
 
 /*
-func newNotFoundError(str string) error {
-	return &ProviderError{
-		errorCode: NotFound,
-		message:   str,
-	}
-}
-
-func getNotFoundMessage(product, id string) string {
-	return fmt.Sprintf("the specified %s %s is not found", product, id)
-}
-
-func isNotFoundError(err error) bool {
-	if e, ok := err.(*ProviderError); ok &&
-		(e.ErrorCode() == NotFound || strings.Contains(strings.ToLower(e.Message()), NotFound)) {
-		return true
+	func newNotFoundError(str string) error {
+		return &ProviderError{
+			errorCode: NotFound,
+			message:   str,
+		}
 	}
 
-	return false
-}
+	func getNotFoundMessage(product, id string) string {
+		return fmt.Sprintf("the specified %s %s is not found", product, id)
+	}
 
+	func isNotFoundError(err error) bool {
+		if e, ok := err.(*ProviderError); ok &&
+			(e.ErrorCode() == NotFound || strings.Contains(strings.ToLower(e.Message()), NotFound)) {
+			return true
+		}
+
+		return false
+	}
 */
 func notFoundError(err error) bool {
 	if ksyunError, ok := err.(awserr.RequestFailure); ok && ksyunError.StatusCode() == 404 {
@@ -80,10 +79,13 @@ func notFoundErrorNew(err error) bool {
 }
 
 func inUseError(err error) bool {
+	if err == nil {
+		return false
+	}
 	errMessage := strings.ToLower(err.Error())
 	if strings.Contains(errMessage, "inuse") ||
 		strings.Contains(errMessage, "in use") ||
-		strings.Contains(errMessage, "INVALID_ACTION") ||
+		strings.Contains(errMessage, "invalid_action") ||
 		strings.Contains(errMessage, "used") {
 		return true
 	}

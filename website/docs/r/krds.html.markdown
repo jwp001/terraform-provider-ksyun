@@ -168,7 +168,7 @@ db engine version only support 5.5|5.6|5.7|8.0
 * `master_user_password `-(Required) master account password
 * `vpc_id `- (Required)ID of virtual private network
 * `subnet_id`- (Required)subnet ID
-* `bill_type`- (Required) Bill type, year'month (monthly package), day (daily billing), default: year'month
+* `bill_type`- (Required) Bill type, YEAR_MONTH (monthly package), DAY (daily billing), default: YEAR_MONTH
 * `duration`- (Optional) purchase duration in months
 * `security_group_id `-(Optional) security group ID
 * `preferred_backup_time`- (Optional) backup time
@@ -178,6 +178,7 @@ db engine version only support 5.5|5.6|5.7|8.0
 * `parameters`- (Optional) database parameters
 * `port `-(Optional) port number
 * `instance_has_eip` -(Optional) attach eip for instance
+* `force_restart` - (Optional) Set it to true to make some parameter efficient when modifying them. Default to false.
 
 ## Attributes Reference
 In addition to all arguments above, the following attributes are exported:

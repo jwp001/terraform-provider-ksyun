@@ -1,8 +1,10 @@
 .idea/
 bin/
+vendor/
 terraform-provider-ksyun
 .terraform/
 *.tfstate
 *.tfstate.*
 output_result
 *.log
+vendor_bk

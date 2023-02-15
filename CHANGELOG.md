@@ -1,4 +1,59 @@
-## 1.1.1 (Unreleased)
+## 1.3.62 (Dec 29, 2022)
+
+BUG FIXES:
+
+- 修复KRDS创建失败后，临时参数组没有清理的问题
+
+## 1.3.61 (Dec 27, 2022)
+
+BUG FIXES:
+
+- 修复KRDS修改parameters，float类型参数不生效的问题
+- 修复KRDS新建实例，parameters不生效，必须创建完成后再modify一次的问题
+- 增加KRDS的force_restart参数说明
+
+## 1.3.60 (Dec 15, 2022)
+
+BUG FIXES:
+
+- 修复EIP通过其他方式修改项目制后，无法从tf获取EIP数据的问题。
+
+
+## 1.3.59 (Dec 2, 2022)
+
+BUG FIXES:
+
+- 修复krds只读实例不能更配的问题：ksyun_krds_rr的db_instance_class字段，ForceNew置为false
+
+
+## 1.3.58 (Nov 9, 2022)
+
+BUG FIXES:
+
+- 修复LB监听器绑定ACL后，如果通过其他方式解绑，tf不能正常获取到解绑状态的问题
+
+
+## 1.3.57 (Nov 9, 2022)
+
+IMPROVEMENTS:
+
+- 使用整机镜像创建主机，默认不自动使用镜像关联的快照创建数据盘，需要手动配置盘资源。
+
+
+## 1.3.56 (Nov 1, 2022)
+
+IMPROVEMENTS:
+
+- 支持一键三连，更配会自动关机，自动重启
+- instance的security_group_id增加MinItems限制
+- volume增加snapshot_id字段
+- 优化instance和volume的snapshot_id字段的diff判断（由于api不返回该字段，diff默认忽略）
+
+BUG FIXES:
+
+- 修复更配无法触发的问题
+- 修复机型其他属性修改触发网卡更新的问题
+
 
 ## 1.1.0 (Dec 21,2020)
 

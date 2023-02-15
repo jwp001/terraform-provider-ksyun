@@ -98,9 +98,9 @@ func resourceKsyunKrds() *schema.Resource {
 				}, false),
 			},
 			"duration": {
-				Type:     schema.TypeInt,
-				Optional: true,
-				Computed: true,
+				Type:             schema.TypeInt,
+				Optional:         true,
+				Computed:         true,
 				DiffSuppressFunc: durationSchemaDiffSuppressFunc("bill_type", "YEAR_MONTH"),
 			},
 			"security_group_id": {
@@ -114,6 +114,10 @@ func resourceKsyunKrds() *schema.Resource {
 				Optional: true,
 				Computed: true,
 			},
+
+			// 参数组不能手动指定
+			// 创建时如果有parameters，会创建一个临时的参数组，创建实例时传入，实例创建完毕删除
+			// ！！！如果有指定的需求，需要注意改动清理临时参数组的逻辑，避免误删
 			"db_parameter_group_id": {
 				Type:     schema.TypeString,
 				Computed: true,
@@ -196,7 +200,7 @@ func parameterToHash(v interface{}) int {
 }
 
 func resourceKsyunKrdsCreate(d *schema.ResourceData, meta interface{}) (err error) {
-	err = createKrdsInstance(d, meta,false)
+	err = createKrdsInstance(d, meta, false)
 	if err != nil {
 		return fmt.Errorf("error on creating instance , error is %e", err)
 	}
@@ -204,7 +208,7 @@ func resourceKsyunKrdsCreate(d *schema.ResourceData, meta interface{}) (err erro
 }
 
 func resourceKsyunKrdsRead(d *schema.ResourceData, meta interface{}) (err error) {
-	err = readAndSetKrdsInstance(d, meta,false)
+	err = readAndSetKrdsInstance(d, meta, false)
 	if err != nil {
 		return fmt.Errorf("error on reading instance , error is %s", err)
 	}
@@ -216,7 +220,7 @@ func resourceKsyunKrdsRead(d *schema.ResourceData, meta interface{}) (err error)
 }
 
 func resourceKsyunKrdsUpdate(d *schema.ResourceData, meta interface{}) (err error) {
-	err = modifyKrdsInstance(d, meta,false)
+	err = modifyKrdsInstance(d, meta, false)
 	if err != nil {
 		return fmt.Errorf("error on updating instance , error is %e", err)
 	}

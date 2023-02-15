@@ -89,6 +89,10 @@ func resourceKsyunInstance() *schema.Resource {
 							ValidateFunc: validation.StringInSlice([]string{
 								"SSD3.0",
 								"EHDD",
+								"Local_SSD",
+								"ESSD_PL1",
+								"ESSD_PL2",
+								"ESSD_PL3",
 							}, false),
 						},
 						"disk_size": {
@@ -98,10 +102,12 @@ func resourceKsyunInstance() *schema.Resource {
 							ForceNew:     true,
 							ValidateFunc: validation.IntBetween(10, 16000),
 						},
+						// 快照建盘（API不返回这个值，所以diff时忽略这个值）
 						"disk_snapshot_id": {
-							Type:     schema.TypeString,
-							Optional: true,
-							ForceNew: true,
+							Type:             schema.TypeString,
+							Optional:         true,
+							ForceNew:         true,
+							DiffSuppressFunc: kecDiskSnapshotIdDiffSuppress,
 						},
 						"delete_with_instance": {
 							Type:     schema.TypeBool,
@@ -184,12 +190,19 @@ func resourceKsyunInstance() *schema.Resource {
 				Elem:     &schema.Schema{Type: schema.TypeString},
 				Required: true,
 				Set:      schema.HashString,
+				MinItems: 1,
 			},
 			"private_ip_address": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Computed: true,
 			},
+			// eip和主机的绑定关系，放在绑定的resource里描述，不在vm的结构里提供这个字段
+			// 否则后绑定，资源创建完成时这个字段为空
+			//"public_ip": {
+			//	Type:     schema.TypeString,
+			//	Computed: true,
+			//},
 			"instance_name": {
 				Type:     schema.TypeString,
 				Optional: true,
@@ -245,10 +258,11 @@ func resourceKsyunInstance() *schema.Resource {
 				Optional: true,
 				Computed: true,
 			},
-			"has_init_info": {
-				Type:     schema.TypeBool,
-				Computed: true,
-			},
+			"tags": tagsSchema(),
+			//"has_init_info": {
+			//	Type:     schema.TypeBool,
+			//	Computed: true,
+			//},
 			//some control
 			"has_modify_system_disk": {
 				Type:     schema.TypeBool,
@@ -274,6 +288,21 @@ func resourceKsyunInstance() *schema.Resource {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
+
+			"instance_id": {
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+
+			// AutoCreateEbs: 是否自动创建数据盘；
+			// 针对整机镜像，如果是true会自动使用镜像关联的快照建盘，这种情况用tf管理盘会比较困难，因此tf默认设置为false
+			"auto_create_ebs": {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Default:  false,
+				//ForceNew:         true,
+				DiffSuppressFunc: kecImportDiffSuppress,
+			},
 		},
 	}
 }
@@ -284,7 +313,7 @@ func resourceKsyunInstanceCreate(d *schema.ResourceData, meta interface{}) (err 
 	if err != nil {
 		return fmt.Errorf("error on creating Instance: %s", err)
 	}
-	return err
+	return resourceKsyunInstanceRead(d, meta)
 }
 
 func resourceKsyunInstanceRead(d *schema.ResourceData, meta interface{}) (err error) {

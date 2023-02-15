@@ -44,6 +44,7 @@ func resourceKsyunEip() *schema.Resource {
 					"HourlySettlement",
 					"PostPaidByHour",
 					"HourlyInstantSettlement",
+					"PostpaidByTime",
 				}, false),
 				DiffSuppressFunc: chargeSchemaDiffSuppressFunc,
 			},
@@ -57,8 +58,10 @@ func resourceKsyunEip() *schema.Resource {
 			"project_id": {
 				Type:     schema.TypeString,
 				Optional: true,
-				Default:  0,
+				Computed: true,
+				//Default:  0,
 			},
+			"tags": tagsSchema(),
 
 			"instance_id": {
 				Type:     schema.TypeString,
