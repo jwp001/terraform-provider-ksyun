@@ -4,9 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/hashcode"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"io/ioutil"
 	"log"
 	"os"
@@ -15,6 +12,11 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+
+	"github.com/hashicorp/terraform-plugin-sdk/helper/hashcode"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/mitchellh/mapstructure"
 )
 
 func SchemaSetToInstanceMap(s interface{}, prefix string, input *map[string]interface{}) {
@@ -318,6 +320,9 @@ func transformListUnique(v interface{}, k string, t SdkReqTransform, req *map[st
 	}
 	return nil
 }
+func TransformerWithFilter(v interface{}, k string, t SdkReqTransform, index int, req *map[string]interface{}) (int, error) {
+	return transformWithFilter(v, k, t, index, req)
+}
 
 func transformWithFilter(v interface{}, k string, t SdkReqTransform, index int, req *map[string]interface{}) (int, error) {
 	if x, ok := v.([]interface{}); ok {
@@ -582,14 +587,6 @@ func SdkResponseAutoResourceData(d *schema.ResourceData, resource *schema.Resour
 		for k, v := range root {
 			var value interface{}
 			var err error
-			//if v == nil {
-			//	continue
-			//}
-			//if str, ok := v.(string); ok {
-			//	if str == "" {
-			//		continue
-			//	}
-			//}
 			m := SdkResponseMapping{}
 			target := Hump2Downline(k)
 			if _, ok := extra[k]; ok {
@@ -634,7 +631,6 @@ func SdkResponseAutoResourceData(d *schema.ResourceData, resource *schema.Resour
 					log.Println(err.Error())
 					panic("ERROR: " + err.Error())
 				}
-
 			} else {
 				result[target] = value
 			}
@@ -645,11 +641,15 @@ func SdkResponseAutoResourceData(d *schema.ResourceData, resource *schema.Resour
 	} else if reflect.ValueOf(item).Kind() == reflect.Slice {
 		var result []interface{}
 		result = []interface{}{}
-		root := item.([]interface{})
-		for _, v := range root {
-			value := SdkResponseAutoResourceData(d, resource, v, extra, false)
+
+		// bugfix：直接转换为[]interface{}会panic，改用reflect处理
+		s := reflect.ValueOf(item)
+		for i := 0; i < s.Len(); i++ {
+			elem := s.Index(i)
+			value := SdkResponseAutoResourceData(d, resource, elem.Interface(), extra, false)
 			result = append(result, value)
 		}
+
 		if len(result) > 0 {
 			return result
 		}
@@ -855,4 +855,249 @@ func checkValueInSliceMap(data []interface{}, key string, value interface{}) (c 
 		}
 	}
 	return c
+}
+
+func checkValueInSlice(data []string, key string) (c bool) {
+	for _, iterK := range data {
+		if iterK == key {
+			c = true
+			return c
+		}
+	}
+	return c
+}
+
+func transInterfaceToStruct(source interface{}, target interface{}) (err error) {
+	var bytes []byte
+	bytes, err = json.Marshal(source)
+	if err != nil {
+		return
+	}
+	err = json.Unmarshal(bytes, target)
+	return
+}
+
+func TransformMapValue2StringWithKey(keyPattern string, obj interface{}) error {
+	if obj == nil {
+		return fmt.Errorf("transform object must be not nil")
+	}
+	var (
+		retObj interface{}
+		err    error
+	)
+
+	switch obj.(type) {
+	case []interface{}:
+		for _, subObj := range obj.([]interface{}) {
+			retObj, err = getSdkValue(keyPattern, subObj)
+			if err != nil {
+				return fmt.Errorf("key pattern: %s not exsits in object", keyPattern)
+			}
+			if retObj == nil {
+				continue
+			}
+			transformerValueOfObj2String(retObj)
+		}
+	case map[string]interface{}:
+		retObj, err = getSdkValue(keyPattern, obj)
+		if err != nil {
+			return fmt.Errorf("key pattern: %s not exsits in object", keyPattern)
+		}
+		if retObj == nil {
+			return err
+		}
+		transformerValueOfObj2String(retObj)
+	}
+	return err
+}
+
+// transformerValueOfObj2String will convert values of object, such as map, slice, to string
+// for the nest string field of terraform resource map
+func transformerValueOfObj2String(retObj interface{}) {
+	switch retObj.(type) {
+	case map[string]interface{}:
+		iterObj := retObj.(map[string]interface{})
+		for k, v := range iterObj {
+			switch v.(type) {
+			case float64:
+				// convert float64 to string, which it will cut out the value after the decimal point
+				iterObj[k] = strconv.FormatFloat(v.(float64), 'f', 0, 64)
+			case int:
+				iterObj[k] = strconv.Itoa(v.(int))
+			}
+		}
+
+	}
+}
+
+// IsStructEmpty returns true, if structure is empty
+func IsStructEmpty(raw interface{}, dest interface{}) bool {
+
+	return reflect.DeepEqual(raw, dest)
+}
+
+func StructureConverter(s interface{}, m *map[string]interface{}) error {
+	sVal := reflect.ValueOf(s)
+
+	if sVal.Kind() == reflect.Ptr || m == nil {
+		return fmt.Errorf("converting structure is pointer or output map is nil")
+	}
+
+	if sVal.Kind() != reflect.Struct {
+		return fmt.Errorf("converting interface must be struct")
+	}
+
+	// it's basic convert
+	convertConfig := &mapstructure.DecoderConfig{
+		IgnoreUntaggedFields: true,
+		ZeroFields:           false,
+		Metadata:             nil,
+		Result:               m,
+	}
+
+	decoder, err := mapstructure.NewDecoder(convertConfig)
+	if err != nil {
+		return err
+	}
+	if err := decoder.Decode(s); err != nil {
+		return err
+	}
+
+	// specify to custom type such as list, filter
+	for i := 0; i < sVal.NumField(); i++ {
+		fieldType := sVal.Type().Field(i)
+		fieldVal := sVal.Field(i)
+		transType := fieldType.Tag.Get("type")
+		mapstructureTag := fieldType.Tag.Get("mapstructure")
+		tagName := strings.Split(mapstructureTag, ",")[0]
+		if fieldVal.IsZero() {
+			delete(*m, tagName)
+			continue
+		}
+
+		switch transType {
+		case "list":
+			if err := transformWithN(fieldVal.Interface(), tagName, SdkReqTransform{}, m); err != nil {
+				return err
+			}
+			delete(*m, tagName)
+		case "filter":
+			if err := getFilterParams(fieldVal.Interface(), m); err != nil {
+				return err
+			}
+			delete(*m, tagName)
+		}
+	}
+
+	return nil
+}
+
+func getFilterParams(input interface{}, req *map[string]interface{}) error {
+	filterMap := make(map[string]interface{})
+	var (
+		index = 1
+		err   error
+	)
+
+	if err := mapstructure.Decode(input, &filterMap); err != nil {
+		return err
+	}
+
+	for k, v := range filterMap {
+		if v == "" {
+			continue
+		}
+		compatibleV := []interface{}{v}
+		index, err = transformWithFilter(compatibleV, k, SdkReqTransform{}, index, req)
+		if err != nil {
+			return err
+		}
+	}
+	return err
+}
+
+func MapstructureFiller(m interface{}, s interface{}) error {
+	return mapstructure.Decode(m, s)
+}
+
+func AssembleIds(ids ...string) (s string) {
+	if len(ids) < 1 {
+		return s
+	}
+
+	return strings.Join(ids, ":")
+}
+
+func DisassembleIds(aId string) []string {
+	return strings.Split(aId, ":")
+}
+
+func recursiveMapToTransformListN(m map[string]interface{}, t SdkReqTransform, req *map[string]interface{}, parentKey string) error {
+	for k, v := range m {
+		if parentKey != "" {
+			k = parentKey + "." + Downline2Hump(k)
+		} else {
+			k = Downline2Hump(k)
+		}
+		switch v.(type) {
+		case map[string]interface{}:
+			v1 := v.(map[string]interface{})
+			if err := recursiveMapToTransformListN(v1, t, req, k); err != nil {
+				return err
+			}
+		case []interface{}:
+			err := transformListNWithRecursive(v, k, t, req)
+			if err != nil {
+				return err
+			}
+		default:
+			if err := transformDefault(v, k, t, req); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func transformListNWithRecursive(v interface{}, k string, t SdkReqTransform, req *map[string]interface{}) error {
+	if list, ok := v.([]interface{}); ok {
+		if ok, _, err := transformFieldReqFunc(v, k, t, 0, req); ok {
+			if err != nil {
+				return fmt.Errorf("error on transformListN with transformFieldReqFunc %s", err)
+			}
+			return nil
+		}
+		for index, v1 := range list {
+			switch v1.(type) {
+			case map[string]interface{}:
+				m1 := v1.(map[string]interface{})
+				for k2, v2 := range m1 {
+					k3 := getFinalKey(t, k) + "." + strconv.Itoa(index+1) + "." + getFinalKey(t, k2)
+					var (
+						err error
+					)
+					switch v2.(type) {
+					case []interface{}:
+						err = transformListNWithRecursive(v2, k3, t, req)
+						if err != nil {
+							return err
+						}
+					case map[string]interface{}:
+						_v2 := v2.(map[string]interface{})
+						if err = recursiveMapToTransformListN(_v2, t, req, k3); err != nil {
+							return err
+						}
+					default:
+						(*req)[k3] = v2
+					}
+
+				}
+			default:
+				k3 := getFinalKey(t, k) + "." + strconv.Itoa(index+1)
+				(*req)[k3] = v1
+			}
+
+		}
+	}
+	return nil
 }

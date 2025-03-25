@@ -1,7 +1,48 @@
+/*
+Provides a lb rule resource.
+
+# Example Usage
+
+```hcl
+
+	resource "ksyun_lb_rule" "default" {
+		path = "/tfxun/update",
+		host_header_id = "",
+		backend_server_group_id=""
+		listener_sync="on"
+		method="RoundRobin"
+		session {
+			session_state = "start"
+			session_persistence_period = 1000
+			cookie_type = "ImplantCookie"
+			cookie_name = "cookiexunqq"
+		}
+		health_check{
+			health_check_state = "start"
+			healthy_threshold = 2
+			interval = 200
+			timeout = 2000
+			unhealthy_threshold = 2
+			url_path = "/monitor"
+			host_name = "www.ksyun.com"
+		}
+	}
+
+```
+
+# Import
+
+LB Rule can be imported using the `id`, e.g.
+
+```
+$ terraform import ksyun_lb_rule.example vserver-abcdefg
+```
+*/
 package ksyun
 
 import (
 	"fmt"
+
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
 )
@@ -15,6 +56,15 @@ func resourceKsyunSlbRule() *schema.Resource {
 			v.ForceNew = false
 			v.DiffSuppressFunc = nil
 		}
+
+		switch k {
+		case "http_method":
+			v.Optional = false
+			v.Computed = true
+			v.ValidateFunc = nil
+		case "lb_type":
+			delete(entry, k)
+		}
 	}
 	return &schema.Resource{
 		Create: resourceKsyunSlbRuleCreate,
@@ -27,17 +77,20 @@ func resourceKsyunSlbRule() *schema.Resource {
 
 		Schema: map[string]*schema.Schema{
 			"path": {
-				Type:     schema.TypeString,
-				Required: true,
+				Type:        schema.TypeString,
+				Required:    true,
+				Description: "The path of rule.",
 			},
 			"host_header_id": {
-				Type:     schema.TypeString,
-				Required: true,
-				ForceNew: true,
+				Type:        schema.TypeString,
+				Required:    true,
+				ForceNew:    true,
+				Description: "The id of host header id.",
 			},
 			"backend_server_group_id": {
-				Type:     schema.TypeString,
-				Required: true,
+				Type:        schema.TypeString,
+				Required:    true,
+				Description: "The id of backend server group.",
 			},
 			"listener_sync": {
 				Type:     schema.TypeString,
@@ -46,7 +99,8 @@ func resourceKsyunSlbRule() *schema.Resource {
 					"on",
 					"off",
 				}, false),
-				Default: "on",
+				Default:     "on",
+				Description: "Whether to synchronizethe the health check, the session hold and the forward algorithms of the listener.Valid Values:'on', 'off'. Default is 'on'.",
 			},
 			"method": {
 				Type:     schema.TypeString,
@@ -57,6 +111,7 @@ func resourceKsyunSlbRule() *schema.Resource {
 				}, false),
 				Default:          "RoundRobin",
 				DiffSuppressFunc: lbRuleDiffSuppressFunc,
+				Description:      "Forwarding mode of listener.Valid Values:'RoundRobin', 'LeastConnections'. Default is 'RoundRobin'.",
 			},
 
 			"health_check": {
@@ -68,12 +123,14 @@ func resourceKsyunSlbRule() *schema.Resource {
 				Optional:         true,
 				Computed:         true,
 				DiffSuppressFunc: lbRuleDiffSuppressFunc,
+				Description:      "health check configuration.",
 			},
 			"session": {
-				Type:     schema.TypeList,
-				MaxItems: 1,
-				Optional: true,
-				Computed: true,
+				Type:        schema.TypeList,
+				MaxItems:    1,
+				Optional:    true,
+				Computed:    true,
+				Description: "Session.",
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
 						"session_state": {
@@ -83,13 +140,15 @@ func resourceKsyunSlbRule() *schema.Resource {
 								"start",
 								"stop",
 							}, false),
-							Default: "start",
+							Default:     "start",
+							Description: "The state of session.Valid Values:'start', 'stop'. Default is 'start'.",
 						},
 						"session_persistence_period": {
 							Type:         schema.TypeInt,
 							Optional:     true,
 							ValidateFunc: validation.IntBetween(1, 86400),
 							Default:      7200,
+							Description:  "Session hold timeout.Valid Values:1-86400. Default is '7200'.",
 						},
 						"cookie_type": {
 							Type:     schema.TypeString,
@@ -98,12 +157,14 @@ func resourceKsyunSlbRule() *schema.Resource {
 								"ImplantCookie",
 								"RewriteCookie",
 							}, false),
-							Default: "ImplantCookie",
+							Default:     "ImplantCookie",
+							Description: "The type of the cookie.Valid Values:'ImplantCookie', 'RewriteCookie'. Default is 'ImplantCookie'.",
 						},
 						"cookie_name": {
-							Type:     schema.TypeString,
-							Optional: true,
-							Computed: true,
+							Type:        schema.TypeString,
+							Optional:    true,
+							Computed:    true,
+							Description: "The name of cookie.The CookieType is valid and required when it is 'RewriteCookie'; otherwise, this value is ignored.",
 						},
 					},
 				},
@@ -111,12 +172,14 @@ func resourceKsyunSlbRule() *schema.Resource {
 			},
 
 			"create_time": {
-				Type:     schema.TypeString,
-				Computed: true,
+				Type:        schema.TypeString,
+				Computed:    true,
+				Description: "the creation time.",
 			},
 			"rule_id": {
-				Type:     schema.TypeString,
-				Computed: true,
+				Type:        schema.TypeString,
+				Computed:    true,
+				Description: "The ID of the rule.",
 			},
 		},
 	}

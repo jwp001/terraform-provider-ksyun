@@ -2,18 +2,24 @@ package ksyun
 
 import (
 	"fmt"
+	"net"
+	"reflect"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/terraform-providers/terraform-provider-ksyun/ksyun/internal/pkg/helper"
+	"github.com/terraform-providers/terraform-provider-ksyun/ksyun/internal/pkg/network"
 	"github.com/terraform-providers/terraform-provider-ksyun/logger"
-	"strconv"
-	"time"
 )
 
 type KecService struct {
 	client *KsyunClient
 }
 
-func (s *KecService) readAndSetKecInstance(d *schema.ResourceData, r *schema.Resource, disableSetTag ...bool) (err error) {
+func (s *KecService) readAndSetKecInstance(d *schema.ResourceData, r *schema.Resource, isNew bool, flags ...bool) (err error) {
 	return resource.Retry(5*time.Minute, func() *resource.RetryError {
 		data, callErr := s.readKecInstance(d, "", false)
 		if callErr != nil {
@@ -26,9 +32,9 @@ func (s *KecService) readAndSetKecInstance(d *schema.ResourceData, r *schema.Res
 				return resource.NonRetryableError(fmt.Errorf("error on  reading instane %q, %s", d.Id(), callErr))
 			}
 		} else {
-			//InstanceConfigure
+			// InstanceConfigure
 			SdkResponseAutoResourceData(d, r, data["InstanceConfigure"], nil)
-			//InstanceState
+			// InstanceState
 			stateExtra := map[string]SdkResponseMapping{
 				"Name": {
 					Field: "instance_status",
@@ -37,7 +43,7 @@ func (s *KecService) readAndSetKecInstance(d *schema.ResourceData, r *schema.Res
 			SdkResponseAutoResourceData(d, r, data["InstanceState"], stateExtra)
 			extra := map[string]SdkResponseMapping{}
 			if data["NetworkInterfaceSet"] != nil {
-				//Primary network_interface
+				// Primary network_interface
 				for _, vif := range data["NetworkInterfaceSet"].([]interface{}) {
 					if vif.(map[string]interface{})["NetworkInterfaceType"] == "primary" {
 						extra := map[string]SdkResponseMapping{
@@ -53,7 +59,7 @@ func (s *KecService) readAndSetKecInstance(d *schema.ResourceData, r *schema.Res
 							},
 						}
 						SdkResponseAutoResourceData(d, r, vif, extra)
-						//read dns info
+						// read dns info
 						var networkInterface map[string]interface{}
 						networkInterface, err = s.readKecNetworkInterface(d.Get("network_interface_id").(string))
 						if err != nil {
@@ -78,7 +84,7 @@ func (s *KecService) readAndSetKecInstance(d *schema.ResourceData, r *schema.Res
 					}
 				}
 
-				//extension_network_interface
+				// extension_network_interface
 				extra["NetworkInterfaceSet"] = SdkResponseMapping{
 					Field: "extension_network_interface",
 					FieldRespFunc: func(i interface{}) interface{} {
@@ -96,26 +102,78 @@ func (s *KecService) readAndSetKecInstance(d *schema.ResourceData, r *schema.Res
 				Field: "key_id",
 			}
 
-			//tag
-			if len(disableSetTag) == 0 || !disableSetTag[0] {
+			// tag
+			if len(flags) == 0 || !flags[0] {
 				err = mergeTagsData(d, &data, s.client, "instance")
 				if err != nil {
 					return resource.NonRetryableError(err)
 				}
 			}
+
+			// set data_disks by local data_disks
+			s.setKecDataDisks(d, r, data, isNew)
+			delete(data, "DataDisks")
+
 			SdkResponseAutoResourceData(d, r, data, extra)
 			if v, ok := d.GetOk("force_reinstall_system"); ok {
 				err = d.Set("force_reinstall_system", v)
 			} else {
 				err = d.Set("force_reinstall_system", false)
 			}
-			//control
+			// control
 			_ = d.Set("has_modify_system_disk", false)
 			_ = d.Set("has_modify_password", false)
 			_ = d.Set("has_modify_keys", false)
 			return resource.NonRetryableError(err)
 		}
 	})
+}
+
+func (s *KecService) setKecDataDisks(d *schema.ResourceData, r *schema.Resource, data map[string]interface{}, isNew bool) {
+	if !isNew {
+		if localDataDisks, ok := d.GetOk("data_disks"); ok {
+			var setDataDisks []interface{}
+			remoteDataDisks := data["DataDisks"].([]interface{})
+			for _, localDataDisk := range localDataDisks.([]interface{}) {
+				localDataDiskMap := localDataDisk.(map[string]interface{})
+				for _, remoteDataDisk := range remoteDataDisks {
+					remoteDataDiskMap := remoteDataDisk.(map[string]interface{})
+
+					if localDataDiskMap["disk_id"] == remoteDataDiskMap["DiskId"] {
+						setDataDisks = append(setDataDisks, remoteDataDisk)
+						break
+					}
+
+				}
+			}
+			if setDataDisks != nil {
+				SdkResponseAutoResourceData(d, r, map[string]interface{}{"DataDisks": setDataDisks}, nil)
+			}
+		}
+	} else {
+		if localDataDisks, ok := d.GetOk("data_disks"); ok {
+			var setDataDisks []interface{}
+			remoteDataDisks := data["DataDisks"].([]interface{})
+			for _, remoteDataDisk := range remoteDataDisks {
+				remoteDataDiskMap := remoteDataDisk.(map[string]interface{})
+
+				for _, localDataDisk := range localDataDisks.([]interface{}) {
+					localDataDiskMap := localDataDisk.(map[string]interface{})
+					localHashFunc := helper.HashFuncWithKeys("disk_type", "disk_size", "delete_with_instance")
+					remoteHashFunc := helper.HashFuncWithKeys("DiskType", "DiskSize", "DeleteWithInstance")
+					if localHashFunc(localDataDiskMap) == remoteHashFunc(remoteDataDiskMap) {
+						setDataDisks = append(setDataDisks, remoteDataDisk)
+						break
+					}
+
+				}
+			}
+			if setDataDisks != nil {
+				SdkResponseAutoResourceData(d, r, map[string]interface{}{"DataDisks": setDataDisks}, nil)
+			}
+		}
+	}
+	return
 }
 
 func (s *KecService) ReadAndSetKecInstances(d *schema.ResourceData, r *schema.Resource) (err error) {
@@ -169,9 +227,7 @@ func (s *KecService) ReadAndSetKecInstances(d *schema.ResourceData, r *schema.Re
 }
 
 func (s *KecService) readKecNetworkInterface(networkInterfaceId string) (data map[string]interface{}, err error) {
-	var (
-		networkInterfaces []interface{}
-	)
+	var networkInterfaces []interface{}
 	vpcService := VpcService{s.client}
 	req := map[string]interface{}{
 		"NetworkInterfaceId.1": networkInterfaceId,
@@ -194,6 +250,7 @@ func (s *KecService) readKecNetworkInterface(networkInterfaceId string) (data ma
 func (s *KecService) readKecInstance(d *schema.ResourceData, instanceId string, allProject bool) (data map[string]interface{}, err error) {
 	var (
 		kecInstanceResults []interface{}
+		retryCount         = 3
 	)
 	if instanceId == "" {
 		instanceId = d.Id()
@@ -201,20 +258,38 @@ func (s *KecService) readKecInstance(d *schema.ResourceData, instanceId string, 
 	req := map[string]interface{}{
 		"InstanceId.1": instanceId,
 	}
+
+getProjectLabel:
 	if allProject {
 		err = addProjectInfoAll(d, &req, s.client)
 		if err != nil {
+			if network.IsReadConnectionReset(err) && retryCount > 0 {
+				retryCount--
+				goto getProjectLabel
+			}
 			return data, err
 		}
 	} else {
 		err = addProjectInfo(d, &req, s.client)
 		if err != nil {
+			if network.IsReadConnectionReset(err) && retryCount > 0 {
+				retryCount--
+				goto getProjectLabel
+			}
 			return data, err
 		}
 	}
 
+	// reset retry count
+	retryCount = 3
+readInstanceLabel:
 	kecInstanceResults, err = s.readKecInstances(req)
 	if err != nil {
+		// goto retry label, if err is `read: connection reset by peer`
+		if network.IsReadConnectionReset(err) && retryCount > 0 {
+			retryCount--
+			goto readInstanceLabel
+		}
 		return data, err
 	}
 	for _, v := range kecInstanceResults {
@@ -285,9 +360,7 @@ func readKecNetworkInterfaces(d *schema.ResourceData, meta interface{}, conditio
 }
 
 func (s *KecService) createKecInstance(d *schema.ResourceData, resource *schema.Resource) (err error) {
-	var (
-		callbacks []ApiCall
-	)
+	var callbacks []ApiCall
 	createCall, err := s.createKecInstanceCommon(d, resource)
 	if err != nil {
 		return err
@@ -308,59 +381,120 @@ func (s *KecService) createKecInstance(d *schema.ResourceData, resource *schema.
 	return ksyunApiCallNew(callbacks, d, s.client, true)
 }
 
-func (s *KecService) modifyKecInstance(d *schema.ResourceData, resource *schema.Resource) (err error) {
+func (s *KecService) kecRelatedAttachTags(d *schema.ResourceData, resource *schema.Resource) (calls []ApiCall, err error) {
+	if !d.HasChange("tags") {
+		return
+	}
+	dataDisksIf, ok := d.GetOk("data_disks")
+	if !ok {
+		return
+	}
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("error on attach tags to volumes %s", err)
+		}
+	}()
+	tagService := TagService{s.client}
+
+	resourceType := "volume"
+	// instance
+	// ebs
+	// query ebs by instance id
+	dataDisks := dataDisksIf.([]interface{})
 	var (
-		callbacks []ApiCall
+		tags      = Tags{}
+		volumeIds []string
 	)
-	//project
+	for _, dataDisk := range dataDisks {
+		dataDiskMap := dataDisk.(map[string]interface{})
+		volumeId := dataDiskMap["disk_id"].(string)
+		volumeIds = append(volumeIds, volumeId)
+	}
+
+	desiredTags := d.Get("tags").(map[string]interface{})
+	for k, v := range desiredTags {
+		tags = append(tags, &Tag{
+			Key:   k,
+			Value: v.(string),
+		})
+	}
+
+	if len(volumeIds) > 0 {
+		params, _ := tags.GetTagsParams(resourceType, strings.Join(volumeIds, ","))
+		tagCall, err := tagService.ReplaceResourcesTagsCommonCall(params, false)
+		if err != nil {
+			return calls, fmt.Errorf("error on attach tags to volumes %s", err)
+		}
+		calls = append(calls, tagCall)
+
+	}
+	return calls, err
+}
+
+func (s *KecService) modifyKecInstance(d *schema.ResourceData, resource *schema.Resource) (err error) {
+	var callbacks []ApiCall
+	// project
 	projectCall, err := s.modifyKecInstanceProject(d, resource)
 	if err != nil {
 		return err
 	}
 	callbacks = append(callbacks, projectCall)
-	//tag
+	// tag
 	tagService := TagService{s.client}
 	tagCall, err := tagService.ReplaceResourcesTagsWithResourceCall(d, resource, "instance", true, false)
 	if err != nil {
 		return err
 	}
 	callbacks = append(callbacks, tagCall)
-	//name
+	relatedTagCall, err := s.kecRelatedAttachTags(d, resource)
+	if err != nil {
+		return err
+	}
+	callbacks = append(callbacks, relatedTagCall...)
+	// name
 	nameCall, err := s.modifyKecInstanceName(d, resource)
 	if err != nil {
 		return err
 	}
 	callbacks = append(callbacks, nameCall)
-	//role
+	// role
 	roleCall, err := s.modifyKecInstanceIamRole(d)
 	if err != nil {
 		return err
 	}
 	callbacks = append(callbacks, roleCall)
-	//network update
+	// network update
 	networkCall, err := s.modifyKecInstanceNetwork(d, resource)
 	if err != nil {
 		return err
 	}
 	callbacks = append(callbacks, networkCall)
-	//force stop or start
+
+	// change an instance to another data guard group
+	modifyKecDGGCall, err := s.modifyKecInstanceDataGuardGroupCall(d, resource)
+	if err != nil {
+		return err
+	}
+	callbacks = append(callbacks, modifyKecDGGCall)
+
+	// force stop or start
 	stateCall, err := s.stopOrStartKecInstance(d)
 	if err != nil {
 		return err
 	}
 	callbacks = append(callbacks, stateCall)
-	//need to stop
-	//image
+	// need to stop
+	// image
 	imageCall, err := s.modifyKecInstanceImage(d, resource)
 	if err != nil {
 		return err
 	}
-	//password
+	// password
 	passCall, err := s.modifyKecInstancePassword(d, resource)
 	if err != nil {
 		return err
 	}
-	//key
+	// key
 	addCall, removeCall, err := s.modifyKecInstanceKeys(d)
 	if err != nil {
 		return err
@@ -383,7 +517,7 @@ func (s *KecService) modifyKecInstance(d *schema.ResourceData, resource *schema.
 		}
 		callbacks = append(callbacks, startCall)
 	}
-	//need to restart
+	// need to restart
 	specCall, err := s.modifyKecInstanceType(d, resource)
 	if err != nil {
 		return err
@@ -395,7 +529,7 @@ func (s *KecService) modifyKecInstance(d *schema.ResourceData, resource *schema.
 	}
 	callbacks = append(callbacks, hostNameCall)
 
-	//if hostNameCall.executeCall != nil {
+	// if hostNameCall.executeCall != nil {
 	//	stopCall, err := s.stopKecInstance(d)
 	//	if err != nil {
 	//		return err
@@ -406,7 +540,7 @@ func (s *KecService) modifyKecInstance(d *schema.ResourceData, resource *schema.
 	//		return err
 	//	}
 	//	callbacks = append(callbacks, startCall)
-	//}
+	// }
 
 	// 2022-03-17 [更配重启问题记录] by ydx
 	// 先stop再start，有时候stop执行后机器没有关闭（默认不使用强制重启，避免客户在不知情的情况下影响服务）；
@@ -433,7 +567,7 @@ func (s *KecService) modifyKecInstance(d *schema.ResourceData, resource *schema.
 	return ksyunApiCallNew(callbacks, d, s.client, true)
 }
 
-func (s *KecService) createKecInstanceCommon(d *schema.ResourceData, resource *schema.Resource) (callback ApiCall, err error) {
+func transKecInstanceParams(d *schema.ResourceData, resource *schema.Resource) (map[string]interface{}, error) {
 	transform := map[string]SdkReqTransform{
 		"key_id": {
 			Type: TransformWithN,
@@ -456,9 +590,58 @@ func (s *KecService) createKecInstanceCommon(d *schema.ResourceData, resource *s
 		"force_reinstall_system": {Ignore: true},
 		"tags":                   {Ignore: true},
 	}
-	createReq, err := SdkRequestAutoMapping(d, resource, false, transform, nil, SdkReqParameter{
+
+	instanceParams, err := SdkRequestAutoMapping(d, resource, false, transform, nil, SdkReqParameter{
 		onlyTransform: false,
 	})
+	if err != nil {
+		return instanceParams, err
+	}
+
+	var syncTag interface{}
+	syncTag = d.Get("sync_tag")
+	instanceParams["SyncTag"] = syncTag
+
+	if tags, ok := d.GetOk("tags"); ok {
+		tagsMap := tags.(map[string]interface{})
+		idx := 1
+		for k, v := range tagsMap {
+			instanceParams["Tag."+strconv.Itoa(idx)+".Key"] = k
+			instanceParams["Tag."+strconv.Itoa(idx)+".Value"] = v
+			idx++
+		}
+	}
+
+	return instanceParams, nil
+}
+
+func (s *KecService) createKecInstanceCommon(d *schema.ResourceData, r *schema.Resource) (callback ApiCall, err error) {
+	// transform := map[string]SdkReqTransform{
+	//	"key_id": {
+	//		Type: TransformWithN,
+	//	},
+	//	"system_disk": {
+	//		Type: TransformListUnique,
+	//	},
+	//	"security_group_id": {
+	//		Type: TransformWithN,
+	//	},
+	//	"data_disks": {
+	//		mappings: map[string]string{
+	//			"data_disks": "DataDisk",
+	//			"disk_size":  "Size",
+	//			"disk_type":  "Type",
+	//		}, Type: TransformListN,
+	//	},
+	//	"instance_status":        {Ignore: true},
+	//	"force_delete":           {Ignore: true},
+	//	"force_reinstall_system": {Ignore: true},
+	//	"tags":                   {Ignore: true},
+	// }
+	// createReq, err := SdkRequestAutoMapping(d, resource, false, transform, nil, SdkReqParameter{
+	//	onlyTransform: false,
+	// })
+	createReq, err := transKecInstanceParams(d, r)
 	if err != nil {
 		return callback, err
 	}
@@ -481,9 +664,7 @@ func (s *KecService) createKecInstanceCommon(d *schema.ResourceData, resource *s
 		},
 		afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
 			logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
-			var (
-				instanceId interface{}
-			)
+			var instanceId interface{}
 			if resp != nil {
 				instanceId, err = getSdkValue("InstancesSet.0.InstanceId", *resp)
 				if err != nil {
@@ -495,7 +676,7 @@ func (s *KecService) createKecInstanceCommon(d *schema.ResourceData, resource *s
 			if err != nil {
 				return err
 			}
-			return s.readAndSetKecInstance(d, resource, true)
+			return s.readAndSetKecInstance(d, r, true, true)
 		},
 	}
 	return callback, err
@@ -521,12 +702,56 @@ func (s *KecService) modifyKecInstanceType(d *schema.ResourceData, resource *sch
 	}
 	if len(updateReq) > 0 {
 		updateReq["InstanceId"] = d.Id()
+
+		// instanceType是必传参数
+		if _, ok := updateReq["InstanceType"]; !ok {
+			updateReq["InstanceType"] = d.Get("instance_type")
+		}
+		// 如果只是更新了系统盘，可以不配置一键三连
+		// 只有ebs支持ResizeType为online， 本地盘传这个值会报错
+		// 并且只支持特定镜像版本
+		// so 暂时不在这个地方引入系统盘的ResizeType
+		// if !d.HasChange("InstanceType") && d.HasChanges("system_disk.0.disk_size", "system_disk.0.disk_type") {
+		//	distTypeInterface := d.Get("system_disk.0.disk_type")
+		//	if v, ok := distTypeInterface.(string); ok && v != "Local_SSD" {
+		//		updateReq["SystemDisk.ResizeType"] = "online"
+		//	}
+		// } else {
+		//	updateReq["StopInstance"] = true
+		//	updateReq["AutoRestart"] = true
+		// }
+		// check instance type change content
+		// it's need to stop this instance, if the change content is demotion config
+		// it's support change on online, if the change content will modify instance type or upgrade config
+		oldInstanceTypeIf, newInstanceTypeIf := d.GetChange("instance_type")
+		oldInstanceType, _ := If2String(oldInstanceTypeIf)
+		newInstanceType, _ := If2String(newInstanceTypeIf)
+		if s.isInstanceDemotionConfig(oldInstanceType, newInstanceType) {
+			updateReq["IsPreStopInstance"] = true
+		}
+
 		// 兼容一键三连功能
 		updateReq["StopInstance"] = true
 		updateReq["AutoRestart"] = true
+
 		callback = ApiCall{
 			param:  &updateReq,
 			action: "ModifyInstanceType",
+			beforeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (bool, error) {
+				// check upgrade or demotion instance type
+				if isPreStop, ok := (*call.param)["IsPreStopInstance"]; !ok || !isPreStop.(bool) {
+					return true, nil
+				}
+				delete(*call.param, "IsPreStopInstance")
+				callFunc, err := s.stopKecInstance(d)
+				if err != nil {
+					return false, err
+				}
+				if err := ksyunApiCallNew([]ApiCall{callFunc}, d, client, false); err != nil {
+					return false, err
+				}
+				return true, nil
+			},
 			executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
 				conn := client.kecconn
 				logger.Debug(logger.RespFormat, call.action, *(call.param))
@@ -539,7 +764,6 @@ func (s *KecService) modifyKecInstanceType(d *schema.ResourceData, resource *sch
 					"active",
 					"resize_success_local", "migrating_success", "migrating_success_off_line", "cross_finish",
 				}, d.Timeout(schema.TimeoutUpdate))
-
 				if err != nil {
 					return err
 				}
@@ -549,11 +773,12 @@ func (s *KecService) modifyKecInstanceType(d *schema.ResourceData, resource *sch
 	}
 	return callback, err
 }
+
 func (s *KecService) modifyKecInstanceIamRole(d *schema.ResourceData) (callback ApiCall, err error) {
 	if d.HasChange("iam_role_name") {
 		_, nr := d.GetChange("iam_role_name")
 		if nr == "" {
-			//unbind
+			// unbind
 			updateReq := map[string]interface{}{
 				"InstanceId.1": d.Id(),
 			}
@@ -572,7 +797,7 @@ func (s *KecService) modifyKecInstanceIamRole(d *schema.ResourceData) (callback 
 				},
 			}
 		} else {
-			//change
+			// change
 			updateReq := map[string]interface{}{
 				"InstanceId.1": d.Id(),
 				"IamRoleName":  nr,
@@ -640,6 +865,57 @@ func (s *KecService) modifyKecInstanceName(d *schema.ResourceData, resource *sch
 			afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
 				logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
 				return err
+			},
+		}
+	}
+	return callback, err
+}
+
+func (s *KecService) modifyKecInstanceDataGuardGroupCall(d *schema.ResourceData, resource *schema.Resource) (callback ApiCall, err error) {
+	if d.HasChange("data_guard_id") {
+		changeParas := make(map[string]interface{})
+		changeParas["InstanceId"] = d.Id()
+		preDGG, wantsDGG := d.GetChange("data_guard_id")
+		changeParas["Old-DGG"], _ = If2String(preDGG)
+		changeParas["New-DGG"], _ = If2String(wantsDGG)
+		callback = ApiCall{
+			param:  &changeParas,
+			action: "ModifyVmDataGuard",
+			beforeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (bool, error) {
+				if (*call.param)["Old-DGG"] != "" {
+					conn := client.kecconn
+					removeParam := map[string]interface{}{
+						"InstanceId.1": d.Id(),
+						"DataGuardId":  (*call.param)["Old-DGG"],
+					}
+
+					resp, err := conn.RemoveVmFromDataGuard(&removeParam)
+					if err != nil {
+						return false, err
+					}
+					logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+					err = s.checkKecInstanceState(d, "", []string{"active"}, d.Timeout(schema.TimeoutUpdate))
+					if err != nil {
+						return false, err
+					}
+					return true, nil
+				}
+				return true, nil
+			},
+			executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+				if (*call.param)["New-DGG"] != "" {
+					conn := client.kecconn
+					addParam := map[string]interface{}{
+						"InstanceId.1": d.Id(),
+						"DataGuardId":  (*call.param)["New-DGG"],
+					}
+
+					return conn.AddVmIntoDataGuard(&addParam)
+				}
+				return resp, err
+			},
+			afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+				return s.checkKecInstanceState(d, "", []string{"active"}, d.Timeout(schema.TimeoutUpdate))
 			},
 		}
 	}
@@ -726,7 +1002,7 @@ func (s *KecService) updateKecInstanceNetwork(updateReq map[string]interface{}, 
 					return err
 				}
 				if init {
-					return s.readAndSetKecInstance(d, resource)
+					return s.readAndSetKecInstance(d, resource, false)
 				}
 				return err
 			},
@@ -829,6 +1105,10 @@ func (s *KecService) modifyKecInstanceImage(d *schema.ResourceData, resource *sc
 	}
 	if _, ok := updateReq["ImageId"]; ok {
 		updateReq["InstanceId"] = d.Id()
+		if userData, uOk := d.GetOk("user_data"); uOk {
+			updateReq["UserData"] = userData
+		}
+
 		err = d.Set("has_modify_system_disk", true)
 		if err != nil {
 			return callback, err
@@ -855,6 +1135,9 @@ func (s *KecService) modifyKecInstanceImage(d *schema.ResourceData, resource *sc
 				err = s.checkKecInstanceState(d, "", []string{"active"}, d.Timeout(schema.TimeoutUpdate))
 				if err != nil {
 					return err
+				}
+				if userData, ok := updateReq["UserData"]; ok {
+					_ = d.Set("user_data", userData)
 				}
 				return err
 			},
@@ -937,7 +1220,6 @@ func (s *KecService) rebootOrStartKecInstance(d *schema.ResourceData) (callback 
 		param:  &updateReq,
 		action: "RebootOrStartInstances",
 		executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
-
 			data, err := s.readKecInstance(d, "", false)
 			if err != nil {
 				return nil, err
@@ -946,16 +1228,24 @@ func (s *KecService) rebootOrStartKecInstance(d *schema.ResourceData) (callback 
 			if err != nil {
 				return nil, err
 			}
-			if status == "active" {
-				return nil, nil
-			}
-			//"active",
-			//	"resize_success_local", "migrating_success", "migrating_success_off_line", "cross_finish",
-
 			conn := client.kecconn
-			logger.Debug(logger.RespFormat, call.action, *(call.param))
-			resp, err = conn.RebootInstances(call.param)
-			return resp, err
+			statusStr, _ := If2String(status)
+			switch statusStr {
+			case "migrating_success":
+				logger.Debug(logger.RespFormat, call.action, *(call.param))
+				resp, err = conn.RebootInstances(call.param)
+				return resp, err
+			case "resize_success_local", "migrating_success_off_line", "cross_finish":
+				logger.Debug(logger.RespFormat, call.action, *(call.param), statusStr)
+				resp, err = conn.StartInstances(call.param)
+				return resp, err
+			case "active":
+				return nil, nil
+			default:
+				return nil, fmt.Errorf("the current status of the resource does not support this operation %s", statusStr)
+			}
+			// "active",
+			//	"resize_success_local", "migrating_success", "migrating_success_off_line", "cross_finish",
 		},
 		afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
 			logger.Debug(logger.RespFormat, call.action, *(call.param), resp)
@@ -1029,6 +1319,8 @@ func (s *KecService) stopKecInstance(d *schema.ResourceData) (callback ApiCall, 
 			if status.(string) == "stopped" {
 				doExecute = false
 			} else {
+				// if instance state is another state, such as migrating_success, resize_success_local and so on.
+				// instance state must be active so that it can stop this instance.
 				doExecute = true
 			}
 			return doExecute, err
@@ -1132,9 +1424,7 @@ func (s *KecService) checkKecInstanceState(d *schema.ResourceData, instanceId st
 
 func (s *KecService) kecInstanceStateRefreshFunc(d *schema.ResourceData, instanceId string, failStates []string) resource.StateRefreshFunc {
 	return func() (interface{}, string, error) {
-		var (
-			err error
-		)
+		var err error
 		data, err := s.readKecInstance(d, instanceId, true)
 		if err != nil {
 			return nil, "", err
@@ -1179,12 +1469,60 @@ func (s *KecService) createNetworkInterfaceCall(d *schema.ResourceData, resource
 	return vpcService.CreateNetworkInterfaceCall(&createReq)
 }
 
+func (s *KecService) AssignPrivateIpsCall(d *schema.ResourceData, resource *schema.Resource) (callback ApiCall, err error) {
+	vpcService := VpcService{s.client}
+
+	secondaryIpsSet, ipsOk := d.GetOk("secondary_private_ips")
+	secondaryIpsCount, countOk := d.GetOk("secondary_private_ip_address_count")
+	if !countOk && !ipsOk {
+		return
+	}
+
+	assignParams := make(map[string]interface{})
+
+	if countOk {
+		assignParams["SecondaryPrivateIpAddressCount"] = secondaryIpsCount
+	}
+
+	if ipsOk {
+		secondaryIps, ok := secondaryIpsSet.(*schema.Set)
+		if ok {
+			ips := make([]interface{}, 0, secondaryIps.Len())
+			for _, ipIf := range secondaryIps.List() {
+				ip, _ := If2Map(ipIf)
+				if ip != nil {
+					ipStr := ip["ip"].(string)
+					netIp := net.ParseIP(ipStr)
+					if netIp == nil {
+						return callback, fmt.Errorf("ip %s is invalid", ipStr)
+					}
+					ips = append(ips, ipStr)
+				}
+			}
+			if len(ips) > 0 {
+				if err = transformWithN(ips, "PrivateIpAddress", SdkReqTransform{}, &assignParams); err != nil {
+					return callback, err
+				}
+			}
+		}
+	}
+
+	return vpcService.AssignPrivateIpsCall(&assignParams)
+}
+
 func (s *KecService) createNetworkInterface(d *schema.ResourceData, resource *schema.Resource) (err error) {
 	call, err := s.createNetworkInterfaceCall(d, resource)
 	if err != nil {
 		return err
 	}
-	return ksyunApiCallNew([]ApiCall{call}, d, s.client, true)
+
+	// assign secondary private ips
+	assignSecondaryIpsCall, err := s.AssignPrivateIpsCall(d, resource)
+	if err != nil {
+		return err
+	}
+
+	return ksyunApiCallNew([]ApiCall{call, assignSecondaryIpsCall}, d, s.client, true)
 }
 
 func (s *KecService) readAndSetNetworkInterface(d *schema.ResourceData, resource *schema.Resource) (err error) {
@@ -1207,13 +1545,63 @@ func (s *KecService) readAndSetNetworkInterface(d *schema.ResourceData, resource
 				return sgIds
 			},
 		},
+		"AssignedPrivateIpAddressSet": {
+			Field: "secondary_private_ips",
+			FieldRespFunc: func(i interface{}) interface{} {
+				ipsVal := reflect.ValueOf(i)
+				if ipsVal.IsNil() || ipsVal.Len() < 1 {
+					return i
+				}
+
+				if ipsVal.Kind() == reflect.Ptr {
+					ipsVal = ipsVal.Elem()
+				}
+
+				retIps := make([]map[string]interface{}, 0, ipsVal.Len())
+				switch ipsVal.Kind() {
+				case reflect.Slice:
+					assignedSet := ipsVal.Interface().([]interface{})
+					for _, assignedMapIf := range assignedSet {
+						m := map[string]interface{}{}
+						assignedMap, _ := If2Map(assignedMapIf)
+						if assignedMap == nil {
+							return i
+						}
+						m["ip"] = assignedMap["PrivateIpAddress"]
+						retIps = append(retIps, m)
+					}
+				}
+				return retIps
+			},
+		},
 	}
 	SdkResponseAutoResourceData(d, resource, data, extra)
+	_, manually := d.GetOk("secondary_private_ips")
+	_, count := d.GetOk("secondary_private_ip_address_count")
+
+	assignInfraSetIf, ok := data["AssignedPrivateIpAddressSet"]
+	assignInfraSet := make([]interface{}, 0)
+	if ok {
+		assignInfraSet, _ = If2Slice(assignInfraSetIf)
+	} else {
+		// deal with AssignedPrivateIpAddressSet field is not exist in sdk response
+		_ = d.Set("secondary_private_ips", assignInfraSet)
+	}
+	if !manually && !count {
+		// import mode
+		_ = d.Set("secondary_private_ip_address_count", len(assignInfraSet))
+	}
+
 	return err
 }
 
 func (s *KecService) modifyNetworkInterfaceAttrCall(d *schema.ResourceData, resource *schema.Resource) (callback ApiCall, err error) {
 	if d.HasChange("subnet_id") || d.HasChange("private_ip_address") || d.HasChange("security_group_ids") {
+		_, isManual := d.GetOk("secondary_private_ips")
+		_, isCount := d.GetOk("secondary_private_ip_address_count")
+		if isManual || isCount {
+			return callback, fmt.Errorf("the operation, changing `subnet_id`, `security_group_ids` or `private_ip_address`, will cleanup all Secondary Private Ip, you should delete `secondary_private_ips` or `secondary_private_ip_address_count` field in your configuration")
+		}
 		transform := map[string]SdkReqTransform{
 			"subnet_id": {
 				forceUpdateParam: true,
@@ -1246,6 +1634,43 @@ func (s *KecService) modifyNetworkInterfaceAttrCall(d *schema.ResourceData, reso
 					return err
 				},
 			}
+
+			removeInfraIpFunc := func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (bool, error) {
+				vpcSrv := VpcService{client: client}
+				kniData, err := vpcSrv.ReadNetworkInterface(d, d.Id())
+				if err != nil {
+					return false, err
+				}
+				infraIpParams := make(map[string]interface{})
+				if secondaryInfraIpSet, ok := kniData["AssignedPrivateIpAddressSet"]; ok {
+					secondaryInfraIpVal := reflect.ValueOf(secondaryInfraIpSet)
+					if secondaryInfraIpVal.Kind() == reflect.Interface || secondaryInfraIpVal.Kind() == reflect.Ptr {
+						secondaryInfraIpVal = secondaryInfraIpVal.Elem()
+					}
+					ipSlice := make([]interface{}, 0, secondaryInfraIpVal.Len())
+					for _, secondaryInfraIpMapIf := range secondaryInfraIpVal.Interface().([]interface{}) {
+						infraIpMap, _ := If2Map(secondaryInfraIpMapIf)
+						if infraIpMap == nil {
+							continue
+						}
+						ipSlice = append(ipSlice, infraIpMap["PrivateIpAddress"])
+					}
+					err := transformWithN(ipSlice, "PrivateIpAddress", SdkReqTransform{}, &infraIpParams)
+					if err != nil {
+						return false, err
+					}
+					removeCall, err := vpcSrv.UnAssignPrivateIpsCall(&infraIpParams)
+					if err != nil {
+						return false, err
+					}
+					if err := ksyunApiCallNew([]ApiCall{removeCall}, d, client, true); err != nil {
+						return false, err
+					}
+				}
+				return true, nil
+			}
+
+			callback.beforeCall = removeInfraIpFunc
 		}
 	}
 	return callback, err
@@ -1275,16 +1700,22 @@ func (s *KecService) modifyNetworkInterface(d *schema.ResourceData, resource *sc
 	}
 	calls = append(calls, call)
 	if d.Get("instance_id") != "" {
-		var (
-			attrCall ApiCall
-		)
+		var attrCall ApiCall
 		attrCall, err = s.modifyNetworkInterfaceAttrCall(d, resource)
 		if err != nil {
 			return err
 		}
 		calls = append(calls, attrCall)
 	}
-	return ksyunApiCallNew([]ApiCall{call}, d, s.client, true)
+
+	// secondary private ip modification
+	vpcSrv := VpcService{client: s.client}
+	secondaryInfraIpCall, err := vpcSrv.ModifyNetworkInterfaceSecondaryInfraIpCall(d, resource)
+	if err != nil {
+		return err
+	}
+	calls = append(calls, secondaryInfraIpCall)
+	return ksyunApiCallNew(calls, d, s.client, true)
 }
 
 func (s *KecService) readAndSetNetworkInterfaceAttachment(d *schema.ResourceData, resource *schema.Resource) (err error) {
@@ -1369,4 +1800,37 @@ func (s *KecService) modifyNetworkInterfaceAttachment(d *schema.ResourceData, re
 		return err
 	}
 	return ksyunApiCallNew([]ApiCall{call}, d, s.client, true)
+}
+
+func (s *KecService) isInstanceDemotionConfig(oldType, newType string) bool {
+	oldTypeSlice := strings.Split(oldType, ".")
+	newTypeSlice := strings.Split(newType, ".")
+	if len(oldTypeSlice) < 2 || len(newTypeSlice) < 2 {
+		return false
+	}
+
+	// the instance type will be changed
+	if oldTypeSlice[0] != newTypeSlice[0] {
+		return false
+	}
+
+	// the equivalent instance type
+	oldConfig := oldTypeSlice[1]
+	newConfig := newTypeSlice[1]
+	oldCpuNums := oldConfig[:len(oldConfig)-1]
+	newCpuNums := newConfig[:len(newConfig)-1]
+
+	oNum, _ := strconv.Atoi(oldCpuNums)
+	nNum, _ := strconv.Atoi(newCpuNums)
+	// the cpu nums will be changed
+	if oNum < nNum {
+		return false
+	} else if oNum == nNum {
+		oldMemSize := oldConfig[len(oldConfig)-1]
+		newMemSize := newConfig[len(newConfig)-1]
+		if oldMemSize <= newMemSize {
+			return false
+		}
+	}
+	return true
 }

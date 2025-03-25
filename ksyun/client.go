@@ -6,12 +6,18 @@ import (
 	"github.com/KscSDK/ksc-sdk-go/service/eip"
 	"github.com/KscSDK/ksc-sdk-go/service/epc"
 	"github.com/KscSDK/ksc-sdk-go/service/iam"
+	"github.com/KscSDK/ksc-sdk-go/service/kce"
+	"github.com/KscSDK/ksc-sdk-go/service/kcev2"
 	"github.com/KscSDK/ksc-sdk-go/service/kcm"
+	"github.com/KscSDK/ksc-sdk-go/service/kcrs"
 	"github.com/KscSDK/ksc-sdk-go/service/kcsv1"
 	"github.com/KscSDK/ksc-sdk-go/service/kcsv2"
 	"github.com/KscSDK/ksc-sdk-go/service/kec"
+	"github.com/KscSDK/ksc-sdk-go/service/knad"
+	"github.com/KscSDK/ksc-sdk-go/service/kpfs"
 	"github.com/KscSDK/ksc-sdk-go/service/krds"
 	"github.com/KscSDK/ksc-sdk-go/service/mongodb"
+	"github.com/KscSDK/ksc-sdk-go/service/pdns"
 	"github.com/KscSDK/ksc-sdk-go/service/rabbitmq"
 	"github.com/KscSDK/ksc-sdk-go/service/sks"
 	"github.com/KscSDK/ksc-sdk-go/service/slb"
@@ -19,7 +25,7 @@ import (
 	"github.com/KscSDK/ksc-sdk-go/service/tag"
 	"github.com/KscSDK/ksc-sdk-go/service/tagv2"
 	"github.com/KscSDK/ksc-sdk-go/service/vpc"
-	"github.com/ks3sdklib/aws-sdk-go/service/s3"
+	"github.com/ks3sdklib/ksyun-ks3-go-sdk/ks3"
 )
 
 type KsyunClient struct {
@@ -38,10 +44,33 @@ type KsyunClient struct {
 	epcconn       *epc.Epc             `json:"epcconn,omitempty"`
 	ebsconn       *ebs.Ebs             `json:"ebsconn,omitempty"`
 	mongodbconn   *mongodb.Mongodb     `json:"mongodbconn,omitempty"`
-	ks3conn       *s3.S3               `json:"ks_3_conn,omitempty"`
+	ks3conn       *ks3.Client          `json:"ks_3_conn,omitempty"`
 	iamconn       *iam.Iam             `json:"iamconn,omitempty"`
 	rabbitmqconn  *rabbitmq.Rabbitmq   `json:"rabbitmqconn,omitempty"`
 	bwsconn       *bws.Bws             `json:"bwsconn,omitempty"`
 	tagconn       *tagv2.Tagv2         `json:"tagconn,omitempty"`
 	tagv1conn     *tag.Tag             `json:"tagv1conn,omitempty"`
+	kceconn       *kce.Kce             `json:"kceconn,omitempty"`
+	kcev2conn     *kcev2.Kcev2         `json:"kcev2conn,omitempty"`
+	knadconn      *knad.Knad           `json:"knadconn,omitempty"`
+	pdnsconn      *pdns.Pdns           `json:"pdnsconn,omitempty"`
+	kcrsconn      *kcrs.Kcrs           `json:"kcrsconn,omitempty"`
+	kpfsconn      *kpfs.Kpfs           `json:"kpfsconn,omitempty"`
+
+	config *Config
+}
+
+func (client *KsyunClient) GetVpcClient() *vpc.Vpc {
+	return client.vpcconn
+}
+func (client *KsyunClient) GetKecClient() *kec.Kec {
+	return client.kecconn
+}
+
+func (client *KsyunClient) GetEipClient() *eip.Eip {
+	return client.eipconn
+}
+
+func (client *KsyunClient) GetIamClient() *iam.Iam {
+	return client.iamconn
 }

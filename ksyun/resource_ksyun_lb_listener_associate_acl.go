@@ -1,7 +1,28 @@
+/*
+Associate a Load Balancer Listener resource with acl.
+
+# Example Usage
+
+```hcl
+
+	resource "ksyun_lb_listener_associate_acl" "default" {
+	  listener_id = "b330eae5-11a3-4e9e-bf7d-xxxxxxxxxxxx"
+	  load_balancer_acl_id = "7e94fa82-05c7-496c-ae5e-xxxxxxxxxxxx"
+	}
+
+```
+
+LB Listener assocaite acl resource can be imported using the `listener_id`+`load_balancer_acl_id`, e.g.
+
+```
+$ terraform import ksyun_lb_listener_associate_acl.default ${listener_id}:${load_balancer_acl_id}
+```
+*/
 package ksyun
 
 import (
 	"fmt"
+
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 )
 
@@ -16,14 +37,21 @@ func resourceKsyunListenerAssociateAcl() *schema.Resource {
 
 		Schema: map[string]*schema.Schema{
 			"listener_id": {
-				Type:     schema.TypeString,
-				Required: true,
-				ForceNew: true,
+				Type:        schema.TypeString,
+				Required:    true,
+				ForceNew:    true,
+				Description: "The ID of the listener.",
 			},
 			"load_balancer_acl_id": {
-				Type:     schema.TypeString,
-				Required: true,
-				ForceNew: true,
+				Type:        schema.TypeString,
+				Required:    true,
+				ForceNew:    true,
+				Description: "The ID of the load balancer acl.",
+			},
+			"lb_type": {
+				Type:        schema.TypeString,
+				Computed:    true,
+				Description: "The type of listener. Valid Value: `Alb` and `Slb`. Default: `Slb`.",
 			},
 		},
 	}
@@ -34,6 +62,7 @@ func resourceKsyunListenerAssociateAclCreate(d *schema.ResourceData, meta interf
 	if err != nil {
 		return fmt.Errorf("error on creating listener acl associate %q, %s", d.Id(), err)
 	}
+	_ = d.Set("lb_type", "Slb")
 	return resourceKsyunListenerAssociateAclRead(d, meta)
 }
 

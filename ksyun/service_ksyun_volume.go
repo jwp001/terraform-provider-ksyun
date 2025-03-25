@@ -2,11 +2,12 @@ package ksyun
 
 import (
 	"fmt"
+	"strings"
+	"time"
+
 	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"github.com/terraform-providers/terraform-provider-ksyun/logger"
-	"strings"
-	"time"
 )
 
 type EbsService struct {
@@ -127,7 +128,21 @@ func (s *EbsService) ReadAndSetVolume(d *schema.ResourceData, r *schema.Resource
 				return resource.NonRetryableError(fmt.Errorf("error on  reading volume %q, %s", d.Id(), callErr))
 			}
 		} else {
-			SdkResponseAutoResourceData(d, r, data, chargeExtraForVpc(data))
+			extra := chargeExtraForVpc(data)
+			extra["Tags"] = SdkResponseMapping{
+				Field: "tags",
+				FieldRespFunc: func(i interface{}) interface{} {
+					tags := i.([]interface{})
+					tagMap := make(map[string]interface{})
+					for _, tag := range tags {
+						_m := tag.(map[string]interface{})
+						tagMap[_m["TagKey"].(string)] = _m["TagValue"].(string)
+					}
+					return tagMap
+				},
+			}
+
+			SdkResponseAutoResourceData(d, r, data, extra)
 			return nil
 		}
 	})
@@ -160,6 +175,7 @@ func (s *EbsService) ReadAndSetVolumes(d *schema.ResourceData, r *schema.Resourc
 func (s *EbsService) CreateVolumeCall(d *schema.ResourceData, r *schema.Resource) (callback ApiCall, err error) {
 	transform := map[string]SdkReqTransform{
 		"online_resize": {Ignore: true},
+		"tags":          {Ignore: true},
 	}
 	req, err := SdkRequestAutoMapping(d, r, false, transform, nil, SdkReqParameter{
 		onlyTransform: false,
@@ -198,7 +214,12 @@ func (s *EbsService) CreateVolume(d *schema.ResourceData, r *schema.Resource) (e
 	if err != nil {
 		return err
 	}
-	return ksyunApiCallNew([]ApiCall{call}, d, s.client, true)
+	tagsService := TagService{client: s.client}
+	tagsCall, err := tagsService.ReplaceResourcesTagsWithResourceCall(d, r, "volume", false, false)
+	if err != nil {
+		return err
+	}
+	return ksyunApiCallNew([]ApiCall{call, tagsCall}, d, s.client, true)
 }
 
 func (s *EbsService) ModifyVolumeProjectCall(d *schema.ResourceData, resource *schema.Resource) (callback ApiCall, err error) {
@@ -228,6 +249,7 @@ func (s *EbsService) ModifyVolumeInfoCall(d *schema.ResourceData, r *schema.Reso
 		"project_id":    {Ignore: true},
 		"size":          {Ignore: true},
 		"online_resize": {Ignore: true},
+		"tags":          {Ignore: true},
 	}
 	req, err := SdkRequestAutoMapping(d, r, true, transform, nil, SdkReqParameter{
 		false,
@@ -306,8 +328,8 @@ func (s *EbsService) ModifyVolumeResizeCall(d *schema.ResourceData, r *schema.Re
 
 func (s *EbsService) ModifyVolume(d *schema.ResourceData, r *schema.Resource) (err error) {
 
-	//a := d.HasChange("project_id")
-	//b := d.HasChange("volume_desc")
+	// a := d.HasChange("project_id")
+	// b := d.HasChange("volume_desc")
 
 	projectCall, err := s.ModifyVolumeProjectCall(d, r)
 	if err != nil {
@@ -322,7 +344,13 @@ func (s *EbsService) ModifyVolume(d *schema.ResourceData, r *schema.Resource) (e
 	if err != nil {
 		return err
 	}
-	return ksyunApiCallNew([]ApiCall{projectCall, infoCall, call}, d, s.client, true)
+
+	tagsService := TagService{client: s.client}
+	tagsCall, err := tagsService.ReplaceResourcesTagsWithResourceCall(d, r, "volume", true, false)
+	if err != nil {
+		return err
+	}
+	return ksyunApiCallNew([]ApiCall{projectCall, infoCall, call, tagsCall}, d, s.client, true)
 }
 
 func (s *EbsService) RemoveVolumeCall(d *schema.ResourceData) (callback ApiCall, err error) {
@@ -422,9 +450,9 @@ func (s *EbsService) CreateVolumeAttachCall(d *schema.ResourceData, r *schema.Re
 			return resp, err
 		},
 		callError: func(d *schema.ResourceData, client *KsyunClient, call ApiCall, baseErr error) error {
-			return resource.Retry(5*time.Minute, func() *resource.RetryError {
-				errMessage := strings.ToLower(baseErr.Error())
-				if strings.Contains(errMessage, "OperationFailedWithTradeInstanceError") {
+			return resource.Retry(15*time.Minute, func() *resource.RetryError {
+				// errMessage := strings.ToLower(baseErr.Error())
+				if strings.Contains(baseErr.Error(), "OperationFailedWithTradeInstanceError") {
 					_, callErr := call.executeCall(d, client, call)
 					if callErr == nil {
 						return nil

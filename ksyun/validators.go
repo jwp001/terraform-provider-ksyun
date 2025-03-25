@@ -2,14 +2,34 @@ package ksyun
 
 import (
 	"fmt"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
 	"net"
+	"reflect"
 	"regexp"
+	"strconv"
+
+	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
 )
 
-var validateName = validation.StringMatch(
-	regexp.MustCompile(`^[A-Za-z0-9\p{Han}-_]{1,63}$`),
-	"expected value to be 1 - 63 characters and only support chinese, english, numbers, '-', '_'",
+var (
+	KrdsEnginSlice             = []string{"mysql", "percona", "consistent_mysql", "ebs_mysql"}
+	KrdsMysqlVersion           = []string{"5.7", "5.6", "5.5", "8.0"}
+	KrdsPerconaVersion         = []string{"5.6"}
+	KrdsConsistentMysqlVersion = []string{"5.7"}
+	KrdsEbsMysqlVersion        = []string{"5.7", "5.6"}
+
+	KrdsEnginVersionMap = map[string][]string{
+		"mysql":            KrdsMysqlVersion,
+		"percona":          KrdsPerconaVersion,
+		"consistent_mysql": KrdsConsistentMysqlVersion,
+		"ebs_mysql":        KrdsEbsMysqlVersion,
+	}
+
+	validateName = validation.StringMatch(
+		regexp.MustCompile(`^[A-Za-z0-9\p{Han}-_]{1,63}$`),
+		"expected value to be 1 - 63 characters and only support chinese, english, numbers, '-', '_'",
+	)
+
+	AnyPortType = "Any"
 )
 
 // validateCIDRNetworkAddress ensures that the string value is a valid CIDR that
@@ -236,7 +256,7 @@ func validatePurchaseTime(req *map[string]interface{}, purchaseTimeField string,
 	return nil
 }
 
-//校验Ks3 Bucket name
+// 校验Ks3 Bucket name
 /*
 func validateKs3BucketName(value string) error {
 	if (len(value) < 3) || (len(value) > 63) { //3~63字符之间
@@ -281,3 +301,60 @@ func validateKs3BucketLifecycleTimestamp(v interface{}, k string) (ws []string, 
 }
 
 */
+
+func validateKrdsEngine(val interface{}, k string) (ws []string, errors []error) {
+	engine := val.(string)
+	if !checkValueInSlice(KrdsEnginSlice, engine) {
+		errors = append(errors, fmt.Errorf("krds engine must be mysql, percona, consistent_mysql or ebs_mysql. but got %s", engine))
+	}
+	return
+}
+
+func validateKrdsEngineVersionWithEngine(engine, engineVersion string) bool {
+	return checkValueInSlice(KrdsEnginVersionMap[engine], engineVersion)
+}
+
+func validatePort(v interface{}, k string) (ws []string, errors []error) {
+	value := 0
+	switch t := v.(type) {
+	case string:
+		isAny := reflect.DeepEqual(t, AnyPortType)
+		if isAny {
+			return
+		}
+		value, _ = strconv.Atoi(t)
+	case int:
+		value = t
+	default:
+		errors = append(errors, fmt.Errorf("%q data type error ", k))
+		return
+	}
+	if value < 1 || value > 65535 {
+		errors = append(errors, fmt.Errorf("%q must be a valid port between 1 and 65535", k))
+	}
+	return
+}
+
+func validateValuesDuplication(v interface{}, k string) (ws []string, errors []error) {
+	value := v.([]interface{})
+	m := make(map[string]bool)
+	for _, v := range value {
+		if _, ok := m[v.(string)]; ok {
+			errors = append(errors, fmt.Errorf("%q must be unique", k))
+			return
+		}
+		m[v.(string)] = true
+	}
+	return
+}
+
+func IsDuplicationInSlice(vs []string) bool {
+	m := make(map[string]bool)
+	for _, v := range vs {
+		if _, ok := m[v]; ok {
+			return true
+		}
+		m[v] = true
+	}
+	return false
+}

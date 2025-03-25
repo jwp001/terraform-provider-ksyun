@@ -1,12 +1,19 @@
 package ksyun
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"reflect"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/hashicorp/terraform-plugin-sdk/helper/hashcode"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/terraform-providers/terraform-provider-ksyun/ksyun/internal/pkg/helper"
 	"github.com/terraform-providers/terraform-provider-ksyun/logger"
-	"strconv"
-	"time"
 )
 
 type VpcService struct {
@@ -168,6 +175,44 @@ func (s *VpcService) RemoveNetworkInterfaceCall(d *schema.ResourceData) (callbac
 	return callback, err
 }
 
+func (s *VpcService) AssignPrivateIpsCall(createReq *map[string]interface{}) (callback ApiCall, err error) {
+	callback = ApiCall{
+		param:  createReq,
+		action: "AssignPrivateIpAddress",
+		executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+			(*call.param)["NetworkInterfaceId"] = d.Id()
+			conn := client.vpcconn
+			logger.Debug(logger.RespFormat, call.action, *(call.param))
+			resp, err = conn.AssignPrivateIpAddress(call.param)
+			return resp, err
+		},
+		afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+			logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+			return err
+		},
+	}
+	return callback, err
+}
+
+func (s *VpcService) UnAssignPrivateIpsCall(removeReq *map[string]interface{}) (callback ApiCall, err error) {
+	callback = ApiCall{
+		param:  removeReq,
+		action: "UnassignPrivateIpAddress",
+		executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+			(*call.param)["NetworkInterfaceId"] = d.Id()
+			conn := client.vpcconn
+			logger.Debug(logger.RespFormat, call.action, *(call.param))
+			resp, err = conn.UnassignPrivateIpAddress(call.param)
+			return resp, err
+		},
+		afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+			logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+			return err
+		},
+	}
+	return callback, err
+}
+
 func (s *VpcService) CreateNetworkInterfaceCall(createReq *map[string]interface{}) (callback ApiCall, err error) {
 	callback = ApiCall{
 		param:  createReq,
@@ -258,6 +303,11 @@ func (s *VpcService) ReadVpc(d *schema.ResourceData, vpcId string) (data map[str
 	}
 	for _, v := range results {
 		data = v.(map[string]interface{})
+
+		// deal with terraform plan diff when `Ipv6CidrBlockAssociationSet` is not exist.
+		if val, ok := data["Ipv6CidrBlockAssociationSet"]; !ok {
+			data["Ipv6CidrBlockAssociationSet"] = val
+		}
 	}
 	if len(data) == 0 {
 		return data, fmt.Errorf("Vpc %s not exist ", vpcId)
@@ -383,6 +433,19 @@ func (s *VpcService) RemoveVpcCall(d *schema.ResourceData) (callback ApiCall, er
 	callback = ApiCall{
 		param:  &removeReq,
 		action: "DeleteVpc",
+
+		beforeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (bool, error) {
+			routeFilter := RouteFilter{
+				VpcId: d.Id(),
+			}
+			describeParams := DescribeRoutesParam{
+				Filter: routeFilter,
+			}
+			if err := s.FilterRouteAndRemove(describeParams); err != nil {
+				return false, err
+			}
+			return true, nil
+		},
 		executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
 			conn := client.vpcconn
 			logger.Debug(logger.RespFormat, call.action, *(call.param))
@@ -399,10 +462,22 @@ func (s *VpcService) RemoveVpcCall(d *schema.ResourceData) (callback ApiCall, er
 						return resource.NonRetryableError(fmt.Errorf("error on  reading vpc when delete %q, %s", d.Id(), callErr))
 					}
 				}
-				_, callErr = call.executeCall(d, client, call)
-				if callErr == nil {
-					return nil
+				if call.process == ApiCallBeforeProcess {
+					_, callErr = call.beforeCall(d, client, call)
+					if callErr != nil {
+						return resource.RetryableError(callErr)
+					}
+					_, callErr = call.executeCall(d, client, call)
+					if callErr == nil {
+						return nil
+					}
+				} else if call.process == ApiCallExecuteProcess {
+					_, callErr = call.executeCall(d, client, call)
+					if callErr == nil {
+						return nil
+					}
 				}
+
 				return resource.RetryableError(callErr)
 			})
 		},
@@ -469,8 +544,12 @@ func (s *VpcService) ReadSubnet(d *schema.ResourceData, subnetId string) (data m
 
 		// 手动补AvailabilityZoneName字段，解决和配置字段不能对应引发的问题
 		// 例如: import的时候读不到这个值，导致认为这个值是空，plan会发现值变化
-		if v, ok := data["AvailabilityZoneName"]; ok {
-			data["AvailabilityZone"] = v
+		if val, ok := data["AvailabilityZoneName"]; ok {
+			data["AvailabilityZone"] = val
+		}
+		// deal with terraform plan diff
+		if val, ok := data["Ipv6CidrBlockAssociationSet"]; !ok {
+			data["Ipv6CidrBlockAssociationSet"] = val
 		}
 	}
 	if len(data) == 0 {
@@ -938,6 +1017,9 @@ func (s *VpcService) ReadNat(d *schema.ResourceData, natId string) (data map[str
 	if err != nil {
 		return data, err
 	}
+	if _, ok := d.GetOk("tags"); ok {
+		req["IsContainTag"] = true
+	}
 	results, err = s.ReadNats(req)
 	if err != nil {
 		return data, err
@@ -1002,7 +1084,21 @@ func (s *VpcService) ReadAndSetNat(d *schema.ResourceData, r *schema.Resource) (
 				return resource.NonRetryableError(fmt.Errorf("error on  reading nat %q, %s", d.Id(), callErr))
 			}
 		} else {
-			SdkResponseAutoResourceData(d, r, data, chargeExtraForVpc(data))
+			extra := chargeExtraForVpc(data)
+			extra["TagSet"] = SdkResponseMapping{
+				Field: "tags",
+				FieldRespFunc: func(i interface{}) interface{} {
+					tags := i.([]interface{})
+					tagMap := make(map[string]interface{})
+					for _, tag := range tags {
+						_m := tag.(map[string]interface{})
+						tagMap[_m["TagKey"].(string)] = _m["TagValue"].(string)
+					}
+					return tagMap
+				},
+			}
+
+			SdkResponseAutoResourceData(d, r, data, extra)
 			return nil
 		}
 	})
@@ -1040,12 +1136,18 @@ func (s *VpcService) CreateNat(d *schema.ResourceData, r *schema.Resource) (err 
 	if err != nil {
 		return err
 	}
-	return ksyunApiCallNew([]ApiCall{call}, d, s.client, true)
+	tagsService := TagService{client: s.client}
+	tagsCall, err := tagsService.ReplaceResourcesTagsWithResourceCall(d, r, "nat", false, false)
+	if err != nil {
+		return err
+	}
+	return ksyunApiCallNew([]ApiCall{call, tagsCall}, d, s.client, true)
 }
 
 func (s *VpcService) ModifyNatCall(d *schema.ResourceData, r *schema.Resource) (callback ApiCall, err error) {
 	transform := map[string]SdkReqTransform{
 		"project_id": {Ignore: true},
+		"tags":       {Ignore: true},
 	}
 	req, err := SdkRequestAutoMapping(d, r, true, transform, nil, SdkReqParameter{false})
 	if err != nil {
@@ -1068,6 +1170,84 @@ func (s *VpcService) ModifyNatCall(d *schema.ResourceData, r *schema.Resource) (
 			},
 		}
 	}
+	return callback, err
+}
+
+func (s *VpcService) ModifyNatIpCall(d *schema.ResourceData, r *schema.Resource) (callback ApiCall, err error) {
+	req := map[string]interface{}{}
+
+	if _, ok := d.GetOk("nat_ip_number"); ok && d.HasChange("nat_ip_number") {
+		oldNumberRaw, newNumberRaw := d.GetChange("nat_ip_number")
+		oldNumber := oldNumberRaw.(int)
+		newNumber := newNumberRaw.(int)
+
+		if newNumber > oldNumber {
+			addCount := newNumber - oldNumber
+			req["AddNumber"] = addCount
+			req["NatId"] = d.Id()
+
+			callback = ApiCall{
+				param:  &req,
+				action: "AddNatIp",
+				executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+					conn := client.vpcconn
+					logger.Debug(logger.RespFormat, call.action, *(call.param))
+					resp, err = conn.AddNatIp(call.param)
+					return resp, err
+				},
+				afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+					logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+					return err
+				},
+			}
+		} else {
+			descendCount := oldNumber - newNumber
+			natIpSet := d.Get("nat_ip_set").([]interface{})
+			req["NatId"] = d.Id()
+			callback = ApiCall{
+				param:  &req,
+				action: "DeleteNatIp",
+				executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+					conn := client.vpcconn
+					for _, natIpMapIf := range natIpSet {
+						if descendCount <= 0 {
+							break
+						}
+						natIpMap, _ := If2Map(natIpMapIf)
+						natIpId := natIpMap["nat_ip_id"]
+						(*call.param)["NatIpId"] = natIpId
+
+					execRequest:
+						logger.Debug(logger.RespFormat, call.action, *(call.param))
+						resp, err = conn.DeleteNatIp(call.param)
+						if err != nil {
+							if isExpectError(err, []string{"IsUsed", "NatIpIsUsedByDnat"}) {
+								continue
+							}
+							// it will retry, if sdk returns Payment.CreateOrderFailed. because the previous sub-order is not finished.
+							if isExpectError(err, []string{"CreateOrderFailed"}) {
+								time.Sleep(2 * time.Second)
+								goto execRequest
+							}
+							return nil, err
+						}
+
+						descendCount--
+
+						time.Sleep(500 * time.Millisecond)
+					}
+
+					if descendCount > 0 {
+						err = fmt.Errorf("there are %d nat ip cannot be removed, because of they are in used", descendCount)
+					}
+
+					return resp, err
+				},
+			}
+
+		}
+	}
+
 	return callback, err
 }
 
@@ -1094,15 +1274,30 @@ func (s *VpcService) modifyNatProjectCall(d *schema.ResourceData, resource *sche
 }
 
 func (s *VpcService) ModifyNat(d *schema.ResourceData, r *schema.Resource) (err error) {
+	apiProcess := NewApiProcess(context.Background(), d, s.client, true)
 	projectCall, err := s.modifyNatProjectCall(d, r)
 	if err != nil {
 		return err
 	}
+	apiProcess.PutCalls(projectCall)
 	call, err := s.ModifyNatCall(d, r)
 	if err != nil {
 		return err
 	}
-	return ksyunApiCallNew([]ApiCall{projectCall, call}, d, s.client, true)
+	apiProcess.PutCalls(call)
+	natIPCall, err := s.ModifyNatIpCall(d, r)
+	if err != nil {
+		return err
+	}
+	apiProcess.PutCalls(natIPCall)
+
+	tagsService := TagService{client: s.client}
+	tagsCall, err := tagsService.ReplaceResourcesTagsWithResourceCall(d, r, "nat", true, false)
+	if err != nil {
+		return err
+	}
+	apiProcess.PutCalls(tagsCall)
+	return apiProcess.Run()
 }
 
 func (s *VpcService) RemoveNatCall(d *schema.ResourceData) (callback ApiCall, err error) {
@@ -1173,14 +1368,92 @@ func (s *VpcService) ReadNatAssociate(d *schema.ResourceData, natId string, subn
 	return data, err
 }
 
-func (s *VpcService) ReadAndSetNatAssociate(d *schema.ResourceData, r *schema.Resource) (err error) {
-	data, err := s.ReadNatAssociate(d, d.Get("nat_id").(string), d.Get("subnet_id").(string))
-	if err != nil {
-		return err
+func (s *VpcService) ReadNatAssociateInstance(d *schema.ResourceData, natId string, networkInterfaceId string) (data map[string]interface{}, err error) {
+	data, err = s.ReadNat(d, natId)
+	if items, ok := data["AssociateInstanceSet"]; ok {
+		if len(items.([]interface{})) == 0 {
+			return data, fmt.Errorf("NetworkInterface %s not exist in Nat %s ", networkInterfaceId, natId)
+		}
+		found := false
+		for _, item := range items.([]interface{}) {
+			if item.(map[string]interface{})["NetworkInterfaceId"] == networkInterfaceId {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return data, fmt.Errorf("NetworkInterface %s not exist in Nat %s ", networkInterfaceId, natId)
+		}
+	} else {
+		return data, fmt.Errorf("NetworkInterface %s not exist in Nat %s ", networkInterfaceId, natId)
 	}
-	data["SubnetId"] = d.Get("subnet_id")
+	return data, err
+}
+
+func (s *VpcService) ReadAndSetNatAssociate(d *schema.ResourceData, r *schema.Resource) (err error) {
+	var data map[string]interface{}
+	if subnetId, subnetExist := d.GetOk("subnet_id"); subnetExist {
+		data, err = s.ReadNatAssociate(d, d.Get("nat_id").(string), subnetId.(string))
+		if err != nil {
+			return err
+		}
+		data["SubnetId"] = subnetId
+	}
+	if networkInterfaceId, niExist := d.GetOk("network_interface_id"); niExist {
+		data, err = s.ReadNatAssociateInstance(d, d.Get("nat_id").(string), networkInterfaceId.(string))
+		if err != nil {
+			return err
+		}
+		data["NetworkInterfaceId"] = networkInterfaceId
+	}
+
 	SdkResponseAutoResourceData(d, r, data, nil)
 	return err
+}
+func (s *VpcService) ReadAndSetNatBandwidthLimit(d *schema.ResourceData, r *schema.Resource) (err error) {
+	data, err := s.ReadNatBandwidthLimit(d)
+	SdkResponseAutoResourceData(d, r, data, nil)
+	return err
+}
+
+func (s *VpcService) ReadNatBandwidthLimit(d *schema.ResourceData) (data map[string]interface{}, err error) {
+	kniId := d.Get("network_interface_id").(string)
+	natId := d.Get("nat_id").(string)
+
+	filter := BandwidthLimitFilter{
+		NetworkInterfaceId: kniId,
+	}
+	describeParams := DescribeNatRateLimitParam{
+		Filter: filter,
+		NatId:  natId,
+	}
+
+	req := make(map[string]interface{})
+	err = StructureConverter(describeParams, &req)
+	if err != nil {
+		return data, err
+	}
+
+	conn := s.client.vpcconn
+	action := "DescribeNatRateLimit"
+	logger.Debug(logger.RespFormat, action, req)
+	resp, err := conn.DescribeNatRateLimit(&req)
+	if err != nil {
+		return data, err
+	}
+	bandwidthLimitSet, err := getSdkValue("NatNetworkInterfaceSet", *resp)
+	if err != nil {
+		return data, err
+	}
+
+	if bandwidthLimitSet != nil {
+		bwlVal := reflect.ValueOf(bandwidthLimitSet)
+		if bwlVal.Len() < 1 {
+			return data, fmt.Errorf("there is not a nat bandwidth limit rule relate to kni %s", kniId)
+		}
+		data = bwlVal.Index(0).Interface().(map[string]interface{})
+	}
+	return data, err
 }
 
 func (s *VpcService) CreateNatAssociateCall(d *schema.ResourceData, r *schema.Resource) (callback ApiCall, err error) {
@@ -1206,12 +1479,87 @@ func (s *VpcService) CreateNatAssociateCall(d *schema.ResourceData, r *schema.Re
 	return callback, err
 }
 
+func (s *VpcService) CreateNatAssociateInstanceCall(d *schema.ResourceData, r *schema.Resource) (callback ApiCall, err error) {
+	req, err := SdkRequestAutoMapping(d, r, false, nil, nil)
+	if err != nil {
+		return callback, err
+	}
+	callback = ApiCall{
+		param:  &req,
+		action: "AssociateInstance",
+		executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+			conn := client.vpcconn
+			logger.Debug(logger.RespFormat, call.action, *(call.param))
+			resp, err = conn.AssociateInstance(call.param)
+			return resp, err
+		},
+		afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+			logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+			idSlice := []string{
+				d.Get("nat_id").(string),
+				d.Get("network_interface_id").(string),
+			}
+			d.SetId(strings.Join(idSlice, ":"))
+			return err
+		},
+	}
+	return callback, err
+}
+
+func (s *VpcService) CreateNatInstanceBandwidthLimitCall(d *schema.ResourceData, r *schema.Resource) (callback ApiCall, err error) {
+	req, err := SdkRequestAutoMapping(d, r, false, nil, nil)
+	if err != nil {
+		return callback, err
+	}
+	callback = ApiCall{
+		param:  &req,
+		action: "CreateNatRateLimit",
+		executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+			conn := client.vpcconn
+			logger.Debug(logger.RespFormat, call.action, *(call.param))
+			resp, err = conn.CreateNatRateLimit(call.param)
+			return resp, err
+		},
+		afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+			logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+			limitId, _ := getSdkValue("NatRateLimit.NatRateLimitId", *resp)
+			if limitId == nil {
+				return fmt.Errorf("limitId is not exist")
+			}
+			limitIdStr, _ := If2String(limitId)
+			d.SetId(limitIdStr)
+			return err
+		},
+	}
+	return callback, err
+}
+
 func (s *VpcService) CreateNatAssociate(d *schema.ResourceData, r *schema.Resource) (err error) {
 	call, err := s.CreateNatAssociateCall(d, r)
 	if err != nil {
 		return err
 	}
 	return ksyunApiCallNew([]ApiCall{call}, d, s.client, true)
+}
+
+func (s *VpcService) CreateNatInstanceAssociate(d *schema.ResourceData, r *schema.Resource) (err error) {
+	apiProcess := NewApiProcess(context.Background(), d, s.client, true)
+	call, err := s.CreateNatAssociateInstanceCall(d, r)
+	if err != nil {
+		return err
+	}
+	apiProcess.PutCalls(call)
+	return apiProcess.Run()
+}
+
+func (s *VpcService) CreateNatInstanceBandwidthLimit(d *schema.ResourceData, r *schema.Resource) (err error) {
+	apiProcess := NewApiProcess(context.Background(), d, s.client, true)
+	call, err := s.CreateNatInstanceBandwidthLimitCall(d, r)
+	if err != nil {
+		return err
+	}
+	apiProcess.PutCalls(call)
+	return apiProcess.Run()
 }
 
 func (s *VpcService) RemoveNatAssociateCall(d *schema.ResourceData, natId string, subnetId string) (callback ApiCall, err error) {
@@ -1253,12 +1601,125 @@ func (s *VpcService) RemoveNatAssociateCall(d *schema.ResourceData, natId string
 	return callback, err
 }
 
+func (s *VpcService) RemoveNatInstanceAssociateCall(d *schema.ResourceData, natId string, networkInterfaceId string) (callback ApiCall, err error) {
+	removeReq := map[string]interface{}{
+		"NatId":              natId,
+		"NetworkInterfaceId": networkInterfaceId,
+	}
+	callback = ApiCall{
+		param:  &removeReq,
+		action: "DisassociateInstance",
+		executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+			conn := client.vpcconn
+			logger.Debug(logger.RespFormat, call.action, *(call.param))
+			resp, err = conn.DisassociateInstance(call.param)
+			return resp, err
+		},
+		callError: func(d *schema.ResourceData, client *KsyunClient, call ApiCall, baseErr error) error {
+			return resource.Retry(15*time.Minute, func() *resource.RetryError {
+				_, callErr := s.ReadNatAssociateInstance(d, natId, networkInterfaceId)
+				if callErr != nil {
+					if notFoundError(callErr) {
+						return nil
+					} else {
+						return resource.NonRetryableError(fmt.Errorf("error on  reading nat associate when delete %q, %s", d.Id(), callErr))
+					}
+				}
+				_, callErr = call.executeCall(d, client, call)
+				if callErr != nil {
+					return retryError(callErr)
+				}
+				return nil
+			})
+		},
+		afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+			logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+			return err
+		},
+	}
+	return callback, err
+}
+func (s *VpcService) RemoveNatInstanceBandwidthLimitCall(d *schema.ResourceData) (callback ApiCall, err error) {
+	removeReq := map[string]interface{}{
+		"NatRateLimitId": d.Id(),
+	}
+	callback = ApiCall{
+		param:  &removeReq,
+		action: "DeleteNatRateLimit",
+		executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+			conn := client.vpcconn
+			logger.Debug(logger.RespFormat, call.action, *(call.param))
+			resp, err = conn.DeleteNatRateLimit(call.param)
+			return resp, err
+		},
+		callError: func(d *schema.ResourceData, client *KsyunClient, call ApiCall, baseErr error) error {
+			return resource.Retry(15*time.Minute, func() *resource.RetryError {
+				_, callErr := s.ReadNatBandwidthLimit(d)
+				if callErr != nil {
+					if notFoundError(callErr) {
+						return nil
+					} else {
+						return resource.NonRetryableError(fmt.Errorf("error on reading nat bandwidth limit when delete %q, %s", d.Id(), callErr))
+					}
+				}
+				_, callErr = call.executeCall(d, client, call)
+				if callErr != nil {
+					return retryError(callErr)
+				}
+				return nil
+			})
+		},
+		afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+			logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+			return err
+		},
+	}
+	return callback, err
+}
+
 func (s *VpcService) RemoveNatAssociate(d *schema.ResourceData) (err error) {
 	call, err := s.RemoveNatAssociateCall(d, d.Get("nat_id").(string), d.Get("subnet_id").(string))
 	if err != nil {
 		return err
 	}
 	return ksyunApiCallNew([]ApiCall{call}, d, s.client, true)
+}
+
+func (s *VpcService) RemoveNatInstanceAssociate(d *schema.ResourceData) (err error) {
+	apiProcess := NewApiProcess(context.Background(), d, s.client, true)
+	call, err := s.RemoveNatInstanceAssociateCall(d, d.Get("nat_id").(string), d.Get("network_interface_id").(string))
+	if err != nil {
+		return err
+	}
+	apiProcess.PutCalls(call)
+	return apiProcess.Run()
+}
+
+func (s *VpcService) RemoveNatInstanceBandwidthLimit(d *schema.ResourceData) (err error) {
+	apiProcess := NewApiProcess(context.Background(), d, s.client, true)
+	call, err := s.RemoveNatInstanceBandwidthLimitCall(d)
+	if err != nil {
+		return err
+	}
+	apiProcess.PutCalls(call)
+	return apiProcess.Run()
+}
+func (s *VpcService) UpdateNatBandwidthLimit(d *schema.ResourceData) (err error) {
+	if d.HasChange("bandwidth_limit") {
+		newLimit := d.Get("bandwidth_limit").(int)
+		adjustParams := map[string]interface{}{
+			"NatRateLimitId": d.Id(),
+			"BandwidthLimit": newLimit,
+		}
+		conn := s.client.vpcconn
+		action := "ModifyNatRateLimit"
+		resp, err := conn.ModifyNatRateLimit(&adjustParams)
+		if err != nil {
+			return err
+		}
+		logger.Debug(logger.RespFormat, action, adjustParams, *resp)
+	}
+	return err
 }
 
 func (s *VpcService) ReadNetworkAcls(condition map[string]interface{}) (data []interface{}, err error) {
@@ -1544,7 +2005,7 @@ func (s *VpcService) CreateNetworkAclAssociateCall(d *schema.ResourceData, r *sc
 }
 
 func (s *VpcService) CreateNetworkAclEntryCommonCall(req map[string]interface{}, isSetId bool) (callback ApiCall, err error) {
-	//check
+	// check
 	if req["Protocol"] == "icmp" {
 		if _, ok := req["IcmpType"]; !ok {
 			return callback, fmt.Errorf("NetworkAcl Protocol is icmp,must set IcmpType")
@@ -1673,7 +2134,7 @@ func (s *VpcService) ModifyNetworkAclEntryWithAclCall(d *schema.ResourceData, r 
 		}
 		os := o.(*schema.Set)
 		ns := n.(*schema.Set)
-		//generate new hashcode without description
+		// generate new hashcode without description
 		mayAdd := schema.NewSet(networkAclEntrySimpleHash, ns.Difference(os).List())
 		mayRemove := schema.NewSet(networkAclEntrySimpleHash, os.Difference(ns).List())
 		addCache := make(map[int]interface{})
@@ -1681,14 +2142,14 @@ func (s *VpcService) ModifyNetworkAclEntryWithAclCall(d *schema.ResourceData, r 
 			index := networkAclEntrySimpleHash(entry)
 			addCache[index] = entry
 		}
-		//compare hashcode without description
-		//need add entries
+		// compare hashcode without description
+		// need add entries
 		add := mayAdd.Difference(mayRemove)
-		//need remove entries
+		// need remove entries
 		remove := mayRemove.Difference(mayAdd)
-		//need modify entries
+		// need modify entries
 		modify := mayRemove.Difference(remove)
-		//process modify
+		// process modify
 		if len(modify.List()) > 0 {
 			for _, entry := range modify.List() {
 				var (
@@ -1705,7 +2166,7 @@ func (s *VpcService) ModifyNetworkAclEntryWithAclCall(d *schema.ResourceData, r 
 				callbacks = append(callbacks, callback)
 			}
 		}
-		//process remove
+		// process remove
 		if len(remove.List()) > 0 {
 			for _, entry := range remove.List() {
 				var (
@@ -1718,7 +2179,7 @@ func (s *VpcService) ModifyNetworkAclEntryWithAclCall(d *schema.ResourceData, r 
 				callbacks = append(callbacks, callback)
 			}
 		}
-		//process add
+		// process add
 		if len(add.List()) > 0 {
 			for _, entry := range add.List() {
 				var (
@@ -2019,6 +2480,48 @@ func (s *VpcService) ReadSecurityGroupEntry(d *schema.ResourceData, securityGrou
 	}
 	return data, err
 }
+func (s *VpcService) ReadAndSetSecurityGroupEntryLite(d *schema.ResourceData, r *schema.Resource) (err error) {
+	securityGroupId := d.Get("security_group_id").(string)
+	sg, err := s.ReadSecurityGroup(d, securityGroupId)
+	if err != nil {
+		return err
+	}
+	sgEntryIdMap := make(map[string]map[string]interface{}, 0)
+	securityGroupEntryIdList := make([]string, 0)
+	cidrBlockSet := make([]string, 0)
+	var sgEntry map[string]interface{}
+
+	sgEntrySet := sg["SecurityGroupEntrySet"].([]interface{})
+	for _, entryIf := range sgEntrySet {
+		if entry, ok := entryIf.(map[string]interface{}); !ok {
+			continue
+		} else {
+
+			entryId := entry["SecurityGroupEntryId"].(string)
+			sgEntryIdMap[entryId] = entry
+		}
+
+	}
+	entryIdSetStr, _ := d.Get("security_group_entry_id_list").(string)
+	entryIdList := strings.Split(entryIdSetStr, ",")
+	for _, entryId := range entryIdList {
+		if rule, ok := sgEntryIdMap[entryId]; ok {
+			if sgEntry == nil {
+				sgEntry = rule
+			}
+			securityGroupEntryIdList = append(securityGroupEntryIdList, entryId)
+			cidrBlock := rule["CidrBlock"].(string)
+			cidrBlockSet = append(cidrBlockSet, cidrBlock)
+		}
+	}
+
+	delete(sgEntry, "CidrBlock")
+	SdkResponseAutoResourceData(d, r, sgEntry, nil)
+
+	_ = d.Set("cidr_block", cidrBlockSet)
+	_ = d.Set("security_group_entry_id_list", securityGroupEntryIdList)
+	return err
+}
 
 func (s *VpcService) ReadAndSetSecurityGroups(d *schema.ResourceData, r *schema.Resource) (err error) {
 	transform := map[string]SdkReqTransform{
@@ -2176,7 +2679,7 @@ func (s *VpcService) CreateSecurityGroupEntryCall(d *schema.ResourceData, r *sch
 }
 
 func (s *VpcService) CreateSecurityGroupEntryCommonCall(req map[string]interface{}, isSetId bool) (callback ApiCall, err error) {
-	//check
+	// check
 	if req["Protocol"] == "icmp" {
 		if _, ok := req["IcmpType"]; !ok {
 			return callback, fmt.Errorf("SecurityGroup entry Protocol is icmp,must set IcmpType")
@@ -2206,12 +2709,22 @@ func (s *VpcService) CreateSecurityGroupEntryCommonCall(req map[string]interface
 		afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
 			logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
 			if isSetId {
-				var data map[string]interface{}
+				var (
+					data  map[string]interface{}
+					buf   bytes.Buffer
+					retry int
+				)
+			again:
 				data, err = s.ReadSecurityGroupEntry(d, (*(call.param))["SecurityGroupId"].(string))
 				if err != nil {
+					if notFoundError(err) && retry < 10 {
+						time.Sleep(3 * time.Second)
+						retry++
+						goto again
+					}
 					return err
 				}
-				buf := securityGroupEntryHashBase(data, true)
+				buf = securityGroupEntryHashBase(data, true)
 				d.SetId((*(call.param))["SecurityGroupId"].(string) + buf.String())
 			}
 			return err
@@ -2237,12 +2750,73 @@ func (s *VpcService) CreateSecurityGroup(d *schema.ResourceData, r *schema.Resou
 	return ksyunApiCallNew(callbacks, d, s.client, false)
 }
 
+func (s *VpcService) CreateSecurityGroupEntrySet(d *schema.ResourceData, r *schema.Resource) (err error) {
+	apiProcess := NewApiProcess(context.Background(), d, s.client, true)
+	entries, err := s.CreateSecurityGroupEntryWithSgCall(d, r)
+	if err != nil {
+		return err
+	}
+	apiProcess.PutCalls(entries...)
+	return apiProcess.Run()
+}
+
 func (s *VpcService) CreateSecurityGroupEntry(d *schema.ResourceData, r *schema.Resource) (err error) {
 	call, err := s.CreateSecurityGroupEntryCall(d, r)
 	if err != nil {
 		return err
 	}
 	return ksyunApiCallNew([]ApiCall{call}, d, s.client, true)
+}
+func (s *VpcService) CreateSecurityGroupEntryLite(d *schema.ResourceData, r *schema.Resource) (err error) {
+	apiProcess := NewApiProcess(context.Background(), d, s.client, true)
+	calls, err := s.CreateSecurityGroupEntryLiteCall(d, r)
+	if err != nil {
+		return err
+	}
+	apiProcess.PutCalls(calls...)
+	return apiProcess.Run()
+}
+
+func (s *VpcService) CreateSecurityGroupEntryLiteCall(d *schema.ResourceData, r *schema.Resource) (callbacks []ApiCall, err error) {
+	entryCall, err := s.CreateSecurityGroupEntryCall(d, r)
+	if err != nil {
+		return callbacks, err
+	}
+	afterCall := func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) error {
+		logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+		var idList []string
+		idListStr := d.Get("security_group_entry_id_list").(string)
+
+		if idListStr != "" {
+			idList = strings.Split(idListStr, ",")
+		}
+		rawIdSetIf, gOk := (*resp)["SecurityGroupEntryIdSet"]
+		if !gOk || helper.IsEmpty(rawIdSetIf) {
+			return fmt.Errorf("internal error, cannot get security group entry id from openapi")
+		}
+		rawIdSet := rawIdSetIf.([]interface{})
+		idList = append(idList, rawIdSet[0].(string))
+
+		newIds := strings.Join(idList, ",")
+		return d.Set("security_group_entry_id_list", newIds)
+	}
+
+	cidrBlocks, ok := helper.GetSchemaListWithString(d, "cidr_block")
+	if !ok {
+		return callbacks, fmt.Errorf("cannot get correct a list of values of cidr block")
+	}
+	for _, cidrBlock := range cidrBlocks {
+		liteCall := entryCall.Copy()
+		nParam, ok := helper.MapCopy(*liteCall.param)
+		if !ok {
+			return nil, fmt.Errorf("internal error, failed to copy apicall parameters")
+		}
+		liteCall.param = &nParam
+		(*liteCall.param)["CidrBlock"] = cidrBlock
+		liteCall.afterCall = afterCall
+		callbacks = append(callbacks, liteCall)
+	}
+	return
 }
 
 func (s *VpcService) ModifySecurityGroupCall(d *schema.ResourceData, r *schema.Resource) (callback ApiCall, err error) {
@@ -2302,7 +2876,7 @@ func (s *VpcService) ModifySecurityGroupEntryWithSgCall(d *schema.ResourceData, 
 		}
 		os := o.(*schema.Set)
 		ns := n.(*schema.Set)
-		//generate new hashcode without description
+		// generate new hashcode without description
 		mayAdd := schema.NewSet(securityGroupEntrySimpleHash, ns.Difference(os).List())
 		mayRemove := schema.NewSet(securityGroupEntrySimpleHash, os.Difference(ns).List())
 		addCache := make(map[int]interface{})
@@ -2310,14 +2884,14 @@ func (s *VpcService) ModifySecurityGroupEntryWithSgCall(d *schema.ResourceData, 
 			index := securityGroupEntrySimpleHash(entry)
 			addCache[index] = entry
 		}
-		//compare hashcode without description
-		//need add entries
+		// compare hashcode without description
+		// need add entries
 		add := mayAdd.Difference(mayRemove)
-		//need remove entries
+		// need remove entries
 		remove := mayRemove.Difference(mayAdd)
-		//need modify entries
+		// need modify entries
 		modify := mayRemove.Difference(remove)
-		//process modify
+		// process modify
 		if len(modify.List()) > 0 {
 			for _, entry := range modify.List() {
 				var (
@@ -2334,7 +2908,7 @@ func (s *VpcService) ModifySecurityGroupEntryWithSgCall(d *schema.ResourceData, 
 				callbacks = append(callbacks, callback)
 			}
 		}
-		//process remove
+		// process remove
 		if len(remove.List()) > 0 {
 			for _, entry := range remove.List() {
 				var (
@@ -2347,7 +2921,7 @@ func (s *VpcService) ModifySecurityGroupEntryWithSgCall(d *schema.ResourceData, 
 				callbacks = append(callbacks, callback)
 			}
 		}
-		//process add
+		// process add
 		if len(add.List()) > 0 {
 			for _, entry := range add.List() {
 				var (
@@ -2389,6 +2963,33 @@ func (s *VpcService) ModifySecurityGroupEntryCall(d *schema.ResourceData, r *sch
 	}
 	return callback, err
 }
+func (s *VpcService) ModifySecurityGroupEntryLiteCall(d *schema.ResourceData, r *schema.Resource) (callbacks []ApiCall, err error) {
+	transform := map[string]SdkReqTransform{
+		"description": {},
+	}
+	req, err := SdkRequestAutoMapping(d, r, true, transform, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(req) > 0 {
+		idSet, ok := helper.GetSchemaListWithString(d, "security_group_entry_id_list")
+		if !ok {
+			return nil, fmt.Errorf("internal error, cannot get entry id for modifying")
+		}
+		for _, entryId := range idSet {
+			entryReq := make(map[string]interface{}, 2)
+			entryReq["Description"] = req["Description"]
+			entryReq["SecurityGroupEntryId"] = entryId
+			modifyEntryCall, err := s.ModifySecurityGroupEntryCommonCall(entryReq)
+			if err != nil {
+				return nil, err
+			}
+			callbacks = append(callbacks, modifyEntryCall)
+		}
+
+	}
+	return callbacks, err
+}
 
 func (s *VpcService) ModifySecurityGroup(d *schema.ResourceData, r *schema.Resource) (err error) {
 	var callbacks []ApiCall
@@ -2406,6 +3007,15 @@ func (s *VpcService) ModifySecurityGroup(d *schema.ResourceData, r *schema.Resou
 	}
 	return ksyunApiCallNew(callbacks, d, s.client, true)
 }
+func (s *VpcService) ModifySecurityGroupSet(d *schema.ResourceData, r *schema.Resource) (err error) {
+	apiProcess := NewApiProcess(context.Background(), d, s.client, true)
+	entries, err := s.ModifySecurityGroupEntryWithSgCall(d, r)
+	if err != nil {
+		return err
+	}
+	apiProcess.PutCalls(entries...)
+	return apiProcess.Run()
+}
 
 func (s *VpcService) ModifySecurityGroupEntry(d *schema.ResourceData, r *schema.Resource) (err error) {
 	var callbacks []ApiCall
@@ -2415,6 +3025,16 @@ func (s *VpcService) ModifySecurityGroupEntry(d *schema.ResourceData, r *schema.
 	}
 	callbacks = append(callbacks, call)
 	return ksyunApiCallNew(callbacks, d, s.client, true)
+}
+
+func (s *VpcService) ModifySecurityGroupEntryLite(d *schema.ResourceData, r *schema.Resource) (err error) {
+	apiProcess := NewApiProcess(context.Background(), d, s.client, true)
+	calls, err := s.ModifySecurityGroupEntryLiteCall(d, r)
+	if err != nil {
+		return err
+	}
+	apiProcess.PutCalls(calls...)
+	return apiProcess.Run()
 }
 
 func (s *VpcService) RemoveSecurityGroupCall(d *schema.ResourceData) (callback ApiCall, err error) {
@@ -2523,6 +3143,27 @@ func (s *VpcService) RemoveSecurityGroupEntry(d *schema.ResourceData) (err error
 		return err
 	}
 	return ksyunApiCallNew([]ApiCall{call}, d, s.client, true)
+}
+func (s *VpcService) RemoveSecurityGroupEntryLite(d *schema.ResourceData) (err error) {
+	apiProcess := NewApiProcess(context.Background(), d, s.client, true)
+
+	groupId := d.Get("security_group_id").(string)
+	idListStr_ := d.Get("security_group_entry_id_list").(string)
+	idSet := strings.Split(idListStr_, ",")
+	for _, entryId := range idSet {
+		call, err := s.RemoveSecurityGroupEntryCommonCall(groupId, entryId)
+		if err != nil {
+			return err
+		}
+		apiProcess.PutCalls(call)
+	}
+
+	return apiProcess.Run()
+}
+func (s *VpcService) RemoveSecurityGroupEntryLiteCall(d *schema.ResourceData, entryId string) (callBack ApiCall, err error) {
+	groupId := d.Get("security_group_id").(string)
+
+	return s.RemoveSecurityGroupEntryCommonCall(groupId, entryId)
 }
 
 func (s *VpcService) ReadVpnGateways(condition map[string]interface{}) (data []interface{}, err error) {
@@ -3092,13 +3733,21 @@ func (s *VpcService) CreateVpnTunnelCall(d *schema.ResourceData, r *schema.Resou
 			mapping: "IkeDHGroup",
 		},
 	}
+
+	if d.Get("vpn_gateway_version") == "2.0" {
+		transform["type"] = SdkReqTransform{
+			ValueFunc: func(data *schema.ResourceData) (interface{}, bool) {
+				return Hump2Downline(data.Get("type").(string)), true
+			},
+		}
+	}
 	req, err := SdkRequestAutoMapping(d, r, false, transform, nil, SdkReqParameter{
 		false,
 	})
 	if err != nil {
 		return callback, err
 	}
-	//check
+	// check
 	if _, ok := req["VpnGreIp"]; !ok && req["Type"] == "GreOverIpsec" {
 		return callback, fmt.Errorf("Vpn tunnel type is GreOverIpsec must set VpnGreIp ")
 	}
@@ -3258,4 +3907,168 @@ func (s *VpcService) ReadAndSetAvailabilityZones(d *schema.ResourceData, r *sche
 		idFiled:     "AvailabilityZoneName",
 		targetField: "availability_zones",
 	})
+}
+
+func (s *VpcService) FilterRouteAndRemove(filter DescribeRoutesParam) error {
+	if IsStructEmpty(filter, DescribeRoutesParam{}) {
+		return fmt.Errorf("DescribeRoutesParam is empty")
+	}
+
+	queryParams := make(map[string]interface{})
+	err := StructureConverter(filter, &queryParams)
+	if err != nil {
+		return fmt.Errorf("describe route parameters is invalid, details: %s", err)
+	}
+
+	routes, err := s.ReadRoutes(queryParams)
+	if err != nil {
+		return fmt.Errorf("an error caused while describing routes, details: %s", err)
+	}
+
+	// it is going to delete all routes that depend on vpc
+	for _, route := range routes {
+		routeId, err := getSdkValue("RouteId", route)
+		if err != nil {
+			return err
+		}
+
+		if routeId == nil {
+			continue
+		}
+
+		_routeId, _ := If2String(routeId)
+		if err := s.DeleteRoute(_routeId); err != nil {
+			return err
+		}
+
+	}
+	return nil
+}
+
+func (s *VpcService) DeleteRoute(routeId string) (err error) {
+	conn := s.client.vpcconn
+
+	removeReq := map[string]interface{}{
+		"RouteId": routeId,
+	}
+	logger.Debug(logger.RespFormat, "DeleteRoute", removeReq)
+	_, err = conn.DeleteRoute(&removeReq)
+	return err
+}
+
+func (s *VpcService) ModifyNetworkInterfaceSecondaryInfraIpCall(d *schema.ResourceData, r *schema.Resource) (callback ApiCall, err error) {
+	reqParams := map[string]interface{}{}
+
+	handleIpSetToIpParams := func(ipsSet *schema.Set) map[string]interface{} {
+		ips := make([]interface{}, 0, ipsSet.Len())
+		ipParams := make(map[string]interface{})
+		for _, ipIf := range ipsSet.List() {
+			ipMap, _ := If2Map(ipIf)
+			if ipMap == nil {
+				continue
+			}
+			ips = append(ips, ipMap["ip"])
+		}
+
+		if err = transformWithN(ips, "PrivateIpAddress", SdkReqTransform{}, &ipParams); err != nil {
+			return nil
+		}
+		return ipParams
+	}
+
+	if _, ok := d.GetOk("secondary_private_ips"); ok && d.HasChange("secondary_private_ips") {
+		oldInfraIpSet, newInfraIpSet := d.GetChange("secondary_private_ips")
+		oldInfraIp := oldInfraIpSet.(*schema.Set)
+		newInfraIp := newInfraIpSet.(*schema.Set)
+
+		unassignIps := oldInfraIp.Difference(newInfraIp)
+		addAssignIps := newInfraIp.Difference(oldInfraIp)
+
+		reqParams["unassign"] = handleIpSetToIpParams(unassignIps)
+		reqParams["assign"] = handleIpSetToIpParams(addAssignIps)
+
+	}
+	if _, ok := d.GetOk("secondary_private_ip_address_count"); ok && d.HasChange("secondary_private_ip_address_count") {
+		oldCountRaw, newCountRaw := d.GetChange("secondary_private_ip_address_count")
+		oldCount := oldCountRaw.(int)
+		newCount := newCountRaw.(int)
+		if newCount > oldCount {
+			acquireCount := newCount - oldCount
+
+			if oldCount == 0 {
+				if currInfraIp, ok := d.GetOk("secondary_private_ips"); ok {
+					currInfraIpSet := currInfraIp.(*schema.Set)
+					reqParams["unassign"] = handleIpSetToIpParams(currInfraIpSet)
+				}
+			}
+			m := make(map[string]interface{})
+			m["SecondaryPrivateIpAddressCount"] = acquireCount
+			reqParams["assign"] = m
+		} else if newCount < oldCount {
+			unassignCount := oldCount - newCount
+			if itemSetRaw, ok := d.GetOk("secondary_private_ips"); ok {
+				itemSet := itemSetRaw.(*schema.Set)
+				if unassignCount > itemSet.Len() {
+					return callback, fmt.Errorf("invalid performing, are you try to operate secondary_private_ips and secondary_private_ip_address_count feild simultaneously? ")
+				}
+				unassignSet := schema.NewSet(func(i interface{}) int {
+					setVal := reflect.ValueOf(i)
+					switch setVal.Kind() {
+					case reflect.Map:
+						m := setVal.Interface().(map[string]interface{})
+						return hashcode.String(m["ip"].(string))
+					}
+					return -1
+
+				}, itemSet.List()[:unassignCount])
+				reqParams["unassign"] = handleIpSetToIpParams(unassignSet)
+			}
+		}
+	}
+
+	callback = ApiCall{
+		param:  &reqParams,
+		action: "ModifyNetworkInterface",
+		beforeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (bool, error) {
+			conn := client.vpcconn
+			var unAssignParams map[string]interface{}
+			if unAssignParamsRaw, ok := (*call.param)["unassign"]; ok && unAssignParamsRaw != nil {
+				unAssignParams, _ = If2Map(unAssignParamsRaw)
+				if unAssignParams == nil || len(unAssignParams) < 1 {
+					return true, nil
+				}
+				unAssignParams["NetworkInterfaceId"] = d.Id()
+				resp, err := conn.UnassignPrivateIpAddress(&unAssignParams)
+				if err != nil {
+					return false, err
+				}
+				logger.Debug(logger.RespFormat, call.action, *(call.param), resp)
+			}
+			return true, nil
+		},
+		executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (*map[string]interface{}, error) {
+			conn := client.vpcconn
+			var assignParams map[string]interface{}
+			if assignParamsRaw, ok := (*call.param)["assign"]; ok && assignParamsRaw != nil {
+				assignParams, _ = If2Map(assignParamsRaw)
+				if assignParams == nil || len(assignParams) < 1 {
+					return nil, nil
+				}
+				assignParams["NetworkInterfaceId"] = d.Id()
+				resp, err := conn.AssignPrivateIpAddress(&assignParams)
+				if err != nil {
+					return nil, err
+				}
+				logger.Debug(logger.RespFormat, call.action, *(call.param), resp)
+				return resp, nil
+			}
+			return nil, nil
+		},
+	}
+	return callback, nil
+}
+
+var logCall = func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+	logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+	return err
 }

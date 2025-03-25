@@ -1,11 +1,14 @@
 package ksyun
 
 import (
+	"errors"
 	"fmt"
+	"time"
+
 	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/terraform-providers/terraform-provider-ksyun/ksyun/internal/pkg/helper"
 	"github.com/terraform-providers/terraform-provider-ksyun/logger"
-	"time"
 )
 
 type BareMetalService struct {
@@ -44,9 +47,7 @@ func (s *BareMetalService) ReadBareMetals(condition map[string]interface{}) (dat
 }
 
 func (s *BareMetalService) ReadBareMetal(d *schema.ResourceData, hostId string, allProject bool) (data map[string]interface{}, err error) {
-	var (
-		results []interface{}
-	)
+	var results []interface{}
 	if hostId == "" {
 		hostId = d.Id()
 	}
@@ -104,6 +105,13 @@ func (s *BareMetalService) ReadAndSetBareMetal(d *schema.ResourceData, r *schema
 				}
 				delete(data, "NetworkInterfaceAttributeSet")
 			}
+
+			data["ChargeType"] = "Daily"
+			if chargeTypeIf, ok := data["ChargeType"]; ok && d.Get("trial").(bool) {
+				if chargeType, ok := chargeTypeIf.(string); ok && chargeType == "Trial" {
+					data["ChargeType"] = "Daily"
+				}
+			}
 			extra := map[string]SdkResponseMapping{
 				"RaidTemplateId": {
 					Field: "raid_id",
@@ -140,7 +148,23 @@ func (s *BareMetalService) ReadAndSetBareMetal(d *schema.ResourceData, r *schema
 						return value
 					},
 				},
+				"Tags": {
+					Field: "tags",
+					FieldRespFunc: func(i interface{}) interface{} {
+						tags, ok := i.([]interface{})
+						if !ok {
+							return i
+						}
+						tagMap := make(map[string]interface{})
+						for _, tag := range tags {
+							_m := tag.(map[string]interface{})
+							tagMap[_m["Key"].(string)] = _m["Value"].(string)
+						}
+						return tagMap
+					},
+				},
 			}
+
 			SdkResponseAutoResourceData(d, r, data, extra)
 			return nil
 		}
@@ -216,9 +240,7 @@ func (s *BareMetalService) ReadAndSetBareMetals(d *schema.ResourceData, r *schem
 
 func (s *BareMetalService) BareMetalStateRefreshFunc(d *schema.ResourceData, hostId string, failStates []string) resource.StateRefreshFunc {
 	return func() (interface{}, string, error) {
-		var (
-			err error
-		)
+		var err error
 		data, err := s.ReadBareMetal(d, hostId, true)
 		if err != nil {
 			return nil, "", err
@@ -242,7 +264,7 @@ func (s *BareMetalService) CheckBareMetalState(d *schema.ResourceData, hostId st
 	stateConf := &resource.StateChangeConf{
 		Pending:    []string{},
 		Target:     target,
-		Refresh:    s.BareMetalStateRefreshFunc(d, hostId, []string{"failed"}),
+		Refresh:    s.BareMetalStateRefreshFunc(d, hostId, []string{"failed", "InstallFailed", "ReinstallFailed"}),
 		Timeout:    timeout,
 		Delay:      1 * time.Minute,
 		MinTimeout: 1 * time.Minute,
@@ -274,6 +296,7 @@ func (s *BareMetalService) CreateBareMetalCall(d *schema.ResourceData, resource 
 			mapping: "ExtensionDNS2",
 		},
 		"force_re_install": {Ignore: true},
+		"tags":             {Ignore: true},
 	}
 	req, err := SdkRequestAutoMapping(d, resource, false, transform, nil, SdkReqParameter{
 		onlyTransform: false,
@@ -281,7 +304,11 @@ func (s *BareMetalService) CreateBareMetalCall(d *schema.ResourceData, resource 
 	if err != nil {
 		return callback, err
 	}
-	req["ChargeType"] = "Daily"
+
+	req["ChargeType"] = d.Get("charge_type")
+	if d.Get("trial").(bool) {
+		req["ChargeType"] = "Trial"
+	}
 
 	callback = ApiCall{
 		param:  &req,
@@ -294,9 +321,7 @@ func (s *BareMetalService) CreateBareMetalCall(d *schema.ResourceData, resource 
 		},
 		afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
 			logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
-			var (
-				hostId interface{}
-			)
+			var hostId interface{}
 			if resp != nil {
 				hostId, err = getSdkValue("Host.HostId", *resp)
 				if err != nil {
@@ -304,7 +329,12 @@ func (s *BareMetalService) CreateBareMetalCall(d *schema.ResourceData, resource 
 				}
 				d.SetId(hostId.(string))
 			}
-			err = s.CheckBareMetalState(d, "", []string{"Running"}, d.Timeout(schema.TimeoutCreate))
+
+			running := []string{"Running"}
+			if d.Get("use_hot_standby") == "onlyHotStandby" {
+				running = append(running, "HotStandbyToBeActivated", "HotStandby")
+			}
+			err = s.CheckBareMetalState(d, "", running, d.Timeout(schema.TimeoutCreate))
 			if err != nil {
 				return err
 			}
@@ -315,21 +345,28 @@ func (s *BareMetalService) CreateBareMetalCall(d *schema.ResourceData, resource 
 }
 
 func (s *BareMetalService) CreateBareMetal(d *schema.ResourceData, resource *schema.Resource) (err error) {
-	var (
-		callbacks []ApiCall
-	)
+	var callbacks []ApiCall
 	createCall, err := s.CreateBareMetalCall(d, resource)
 	if err != nil {
 		return err
 	}
 	callbacks = append(callbacks, createCall)
+
+	tagService := TagService{s.client}
+	tagCall, err := tagService.ReplaceResourcesTagsWithResourceCall(d, resource, "epc-instance", false, true)
+	if err != nil {
+		return err
+	}
+
+	callbacks = append(callbacks, tagCall)
 	// dryRun
 	return ksyunApiCallNew(callbacks, d, s.client, true)
 }
 
 func (s *BareMetalService) ModifyBareMetalInfoCall(d *schema.ResourceData, resource *schema.Resource) (callback ApiCall, err error) {
 	transform := map[string]SdkReqTransform{
-		"host_name": {},
+		"host_name":   {},
+		"description": {},
 	}
 	req, err := SdkRequestAutoMapping(d, resource, true, transform, nil)
 	if err != nil {
@@ -392,6 +429,40 @@ func (s *BareMetalService) ModifyBareMetalNetworkCall(d *schema.ResourceData, re
 				conn := client.epcconn
 				logger.Debug(logger.RespFormat, call.action, *(call.param))
 				resp, err = conn.ModifyNetworkInterfaceAttribute(call.param)
+				return resp, err
+			},
+			afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+				logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+				return err
+			},
+		}
+	}
+	return callback, err
+}
+
+func (s *BareMetalService) ModifyBareMetalOverClockAttrCall(d *schema.ResourceData, resource *schema.Resource) (callback ApiCall, err error) {
+	if !d.HasChange("overclocking_attribute") {
+		return
+	}
+
+	attr := d.Get("overclocking_attribute")
+	if attr == "" {
+		return
+	}
+	req := map[string]interface{}{
+		"OverclockingAttribute": attr,
+	}
+
+	if len(req) > 0 {
+		req["HostId"] = d.Id()
+
+		callback = ApiCall{
+			param:  &req,
+			action: "ModifyOverclockingAttribute",
+			executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+				conn := client.epcconn
+				logger.Debug(logger.RespFormat, call.action, *(call.param))
+				resp, err = conn.ModifyOverclockingAttribute(call.param)
 				return resp, err
 			},
 			afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
@@ -495,21 +566,29 @@ func (s *BareMetalService) ReinstallBareMetalCall(d *schema.ResourceData, resour
 	if d.Get("host_type") == "COLO" {
 		return callback, err
 	}
+
+	if !d.HasChange("force_re_install") || !d.Get("force_re_install").(bool) {
+		return callback, err
+	}
 	transform := map[string]SdkReqTransform{
-		"host_name":                    {Ignore: true},
-		"dns1":                         {Ignore: true},
-		"dns2":                         {Ignore: true},
-		"private_ip_address":           {Ignore: true},
-		"security_group_ids":           {Ignore: true},
-		"subnet_id":                    {Ignore: true},
-		"extension_dns1":               {Ignore: true},
-		"extension_dns2":               {Ignore: true},
-		"extension_security_group_ids": {Ignore: true},
-		"extension_private_ip_address": {Ignore: true},
-		"extension_subnet_id":          {Ignore: true},
-		"server_ip":                    {Ignore: true},
-		"path":                         {Ignore: true},
-		"force_re_install":             {Ignore: true},
+		"host_name":                      {Ignore: true},
+		"dns1":                           {Ignore: true},
+		"dns2":                           {Ignore: true},
+		"private_ip_address":             {Ignore: true},
+		"security_group_ids":             {Ignore: true},
+		"subnet_id":                      {Ignore: true},
+		"extension_dns1":                 {Ignore: true},
+		"extension_dns2":                 {Ignore: true},
+		"extension_security_group_ids":   {Ignore: true},
+		"extension_private_ip_address":   {Ignore: true},
+		"extension_subnet_id":            {Ignore: true},
+		"server_ip":                      {Ignore: true},
+		"path":                           {Ignore: true},
+		"force_re_install":               {Ignore: true},
+		"host_status":                    {Ignore: true},
+		"roce_network":                   {Ignore: true},
+		"tags":                           {Ignore: true},
+		"storage_roce_network_card_name": {Ignore: true},
 	}
 	if d.HasChange("force_re_install") && d.Get("force_re_install").(bool) {
 		transform["image_id"] = SdkReqTransform{
@@ -519,7 +598,6 @@ func (s *BareMetalService) ReinstallBareMetalCall(d *schema.ResourceData, resour
 	req, err := SdkRequestAutoMapping(d, resource, true, transform, nil, SdkReqParameter{
 		onlyTransform: false,
 	})
-
 	if err != nil {
 		return callback, err
 	}
@@ -556,7 +634,11 @@ func (s *BareMetalService) ReinstallBareMetalCall(d *schema.ResourceData, resour
 			},
 			afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
 				logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
-				err = s.CheckBareMetalState(d, "", []string{"Running"}, d.Timeout(schema.TimeoutUpdate))
+				running := []string{"Running"}
+				if d.Get("use_hot_standby") == "onlyHotStandby" {
+					running = append(running, "HotStandbyToBeActivated", "HotStandby")
+				}
+				err = s.CheckBareMetalState(d, "", running, d.Timeout(schema.TimeoutUpdate))
 				if err != nil {
 					return err
 				}
@@ -575,6 +657,10 @@ func (s *BareMetalService) ReinstallBareMetalCall(d *schema.ResourceData, resour
 
 func (s *BareMetalService) ReinstallCustomerBareMetalCall(d *schema.ResourceData, resource *schema.Resource) (callback ApiCall, err error) {
 	if d.Get("host_type") != "COLO" {
+		return callback, err
+	}
+
+	if !d.HasChange("force_re_install") || !d.Get("force_re_install").(bool) {
 		return callback, err
 	}
 	transform := map[string]SdkReqTransform{
@@ -618,7 +704,12 @@ func (s *BareMetalService) ReinstallCustomerBareMetalCall(d *schema.ResourceData
 			},
 			afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
 				logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
-				err = s.CheckBareMetalState(d, "", []string{"Running"}, d.Timeout(schema.TimeoutUpdate))
+				running := []string{"Running"}
+				if d.Get("use_hot_standby") == "onlyHotStandby" {
+					running = append(running, "HotStandbyToBeActivated", "HotStandby")
+				}
+
+				err = s.CheckBareMetalState(d, "", running, d.Timeout(schema.TimeoutUpdate))
 				if err != nil {
 					return err
 				}
@@ -629,6 +720,64 @@ func (s *BareMetalService) ReinstallCustomerBareMetalCall(d *schema.ResourceData
 					_ = d.Set("force_re_install", !d.Get("force_re_install").(bool))
 				}
 				return baseErr
+			},
+		}
+	}
+	return callback, err
+}
+
+func (s *BareMetalService) UseHotStandbyCall(d *schema.ResourceData, resource *schema.Resource) (callback ApiCall, err error) {
+	if !d.HasChange("hot_standby") {
+		return
+	}
+
+	standbyReq, ok := helper.GetSchemaListHeadMap(d, "hot_standby")
+	if !ok {
+		return callback, errors.New("failed to get hot_standby request map")
+	}
+
+	standbyReq = helper.ConvertMapKey2Title(standbyReq, true)
+
+	if len(standbyReq) > 0 {
+		standbyReq["HostId"] = d.Id()
+		callback = ApiCall{
+			action: "UseHotStandByEpc",
+			param:  &standbyReq,
+			executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+				conn := client.epcconn
+				logger.Debug(logger.RespFormat, call.action, *(call.param))
+				resp, err = conn.UseHotStandByEpc(call.param)
+				return resp, err
+			},
+			afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+				return err
+			},
+		}
+	}
+	return callback, err
+}
+
+func (s *BareMetalService) ActivateHotStandbyCall(d *schema.ResourceData, resource *schema.Resource) (callback ApiCall, err error) {
+	if !d.HasChange("activate_hot_standby") || !d.Get("activate_hot_standby").(bool) {
+		return
+	}
+
+	standbyReq := map[string]interface{}{
+		"HostId": d.Id(),
+	}
+
+	if len(standbyReq) > 0 {
+		callback = ApiCall{
+			action: "ActivateHotStandbyEpc",
+			param:  &standbyReq,
+			executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+				conn := client.epcconn
+				logger.Debug(logger.RespFormat, call.action, *(call.param))
+				resp, err = conn.ActivateHotStandbyEpc(call.param)
+				return resp, err
+			},
+			afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+				return err
 			},
 		}
 	}
@@ -657,10 +806,57 @@ func (s *BareMetalService) ModifyBareMetalProjectCall(d *schema.ResourceData, re
 	return callback, err
 }
 
+// ModifyBareMetalStatusCall deal with instance start or stop
+func (s *BareMetalService) ModifyBareMetalStatusCall(d *schema.ResourceData, resource *schema.Resource) (callback ApiCall, err error) {
+	if _, ok := d.GetOk("host_status"); ok && d.HasChange("host_status") {
+		hostStatus := d.Get("host_status").(string)
+		updateReq := map[string]interface{}{
+			"HostId": d.Id(),
+		}
+
+		callback = ApiCall{
+			param: &updateReq,
+		}
+		switch hostStatus {
+		case "Running":
+			callback.action = "StartEpc"
+			callback.executeCall = func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+				conn := client.epcconn
+				logger.Debug(logger.RespFormat, call.action, *(call.param))
+				return conn.StartEpc(call.param)
+			}
+		case "Stopped":
+			callback.action = "StopEpc"
+			callback.executeCall = func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+				conn := client.epcconn
+				logger.Debug(logger.RespFormat, call.action, *(call.param))
+				return conn.StopEpc(call.param)
+			}
+		default:
+			return ApiCall{}, fmt.Errorf("host status' value is not espected")
+		}
+		callback.afterCall = func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) error {
+			logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+			checkState := "Running"
+			if call.action == "StartEpc" {
+				checkState = "Running"
+			} else if call.action == "StopEpc" {
+				checkState = "Stopped"
+			}
+			err = s.CheckBareMetalState(d, "", []string{checkState}, d.Timeout(schema.TimeoutUpdate))
+			if err != nil {
+				return err
+			}
+			return err
+		}
+	}
+
+	return callback, err
+}
+
 func (s *BareMetalService) ModifyBareMetal(d *schema.ResourceData, resource *schema.Resource) (err error) {
-	var (
-		callbacks []ApiCall
-	)
+	var callbacks []ApiCall
+
 	reinstallCall, err := s.ReinstallBareMetalCall(d, resource)
 	if err != nil {
 		return err
@@ -720,6 +916,40 @@ func (s *BareMetalService) ModifyBareMetal(d *schema.ResourceData, resource *sch
 		return err
 	}
 	callbacks = append(callbacks, projectCall)
+
+	// overclocking_attribute
+	overclockAttrCall, err := s.ModifyBareMetalOverClockAttrCall(d, resource)
+	if err != nil {
+		return err
+	}
+	callbacks = append(callbacks, overclockAttrCall)
+
+	startOrStopEpcCall, err := s.ModifyBareMetalStatusCall(d, resource)
+	if err != nil {
+		return err
+	}
+	callbacks = append(callbacks, startOrStopEpcCall)
+
+	// tag
+	tagService := TagService{s.client}
+	tagCall, err := tagService.ReplaceResourcesTagsWithResourceCall(d, resource, "epc-instance", true, false)
+	if err != nil {
+		return err
+	}
+
+	callbacks = append(callbacks, tagCall)
+
+	hotStandbyCall, err := s.UseHotStandbyCall(d, resource)
+	if err != nil {
+		return err
+	}
+	callbacks = append(callbacks, hotStandbyCall)
+
+	activateCall, err := s.ActivateHotStandbyCall(d, resource)
+	if err != nil {
+		return err
+	}
+	callbacks = append(callbacks, activateCall)
 	// dryRun
 	return ksyunApiCallNew(callbacks, d, s.client, true)
 }
