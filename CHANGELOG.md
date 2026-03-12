@@ -1,3 +1,86 @@
+## 1.25.1 (March 05, 2026)
+
+BUGFIX：
+
+- `service_ksyun_kce` 修复创建集群或者新增节点时，系统盘参数命名错误的问题
+
+## 1.25.0 (Mar 03, 2026)
+
+BUGFIX：
+
+- `resource_ksyun_ks3_bucket` 修复logging配置通过外部删除后，未在state中移除的问题
+- `ksyun_instance`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+- `ksyun_volume`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+- `ksyun_kpfs_file_system` 资源已被外部删除，从 state 中移除
+- `ksyun_ssh_key` 资源已被外部删除，从 state 中移除
+- `ksyun_bare_metal` 资源已被外部删除，从 state 中移除
+- `ksyun_iam_user`: 修复资源在控制台被删除后，Read 接口直接报错导致 workspace 损坏的问题，现在会正确清除 state
+- `ksyun_iam_role`: 修复资源在控制台被删除后，Read 接口直接报错导致 workspace 损坏的问题，现在会正确清除 state
+- `ksyun_iam_group`: 修复资源在控制台被删除后，Read 接口直接报错导致 workspace 损坏的问题，现在会正确清除 state
+- `ksyun_iam_policy`: 修复资源在控制台被删除后，Read 接口直接报错导致 workspace 损坏的问题，现在会正确清除 state
+- `ksyun_iam_relation_policy`: 修复策略绑定关系在控制台解除后，Read 接口未清除 state 的静默漏洞
+- `ksyun_tag_v2`: 修复标签在控制台被删除后，Read 接口直接报错导致 workspace 损坏的问题，现在会正确清除 state
+- `ksyun_tag_v2_attachment`: 修复标签绑定关系在控制台解除后，Read 接口直接报错导致 workspace 损坏的问题，现在会正确清除 state
+- `ksyun_tag`: 修复标签在控制台被删除后，Read 接口未清除 state 的静默漏洞
+- `ksyun_snapshot`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+- `ksyun_volume_attach`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+- `ksyun_auto_snapshot_policy`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+- `ksyun_auto_snapshot_volume_association`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+- `ksyun_data_guard_group`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+- `ksyun_kec_network_interface_attachment`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+- `ksyun_scaling_group`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+- `ksyun_scaling_configuration`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+- `ksyun_scaling_instance`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+- `ksyun_scaling_notification`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+- `ksyun_scaling_policy`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+- `ksyun_scaling_scheduled_task`: 修复读取接口在资源不存在时未正确处理notFoundError的问题
+
+## 1.24.7 (Feb 27, 2026)
+
+IMPROVEMENTS：
+
+- `ksyun_alb_register_backend_server` update documents
+
+## 1.24.5 (Dec 29, 2025)
+BUGFIX：
+
+- `ksyun_kpfs_file_system` 修改说明
+- `ksyun_kpfs_clusters` 修改说明
+- `ksyun_kpfs_client_install` 修改说明
+
+## 1.24.2 ~ 1.24.4 (Dec 19, 2025)
+
+IMPROVEMENTS：
+
+- `ksyun_volume` 增加数据盘变更
+- `ksyun_instance` 增加数据盘变更
+
+
+## 1.24.1 (Dec 19, 2025)
+
+BUGFIX：
+
+- `ksyun_kpfs_alb` 修复alb_version更新导致的实例变更问题
+- `ksyun_kpfs_alb` 修复enable_hpa默认值与接口不一致，新增、修改不生效问题
+
+## 1.24.0 (Dec 15, 2025)
+
+IMPROVEMENT:
+
+- `ksyun_kpfs_file_system` 资源，支持创建、删除和导入 KPFS 文件系统
+- `ksyun_kpfs_file_systems` 数据源，用于查询 KPFS 文件系统列表
+- `ksyun_kpfs_clusters` 数据源，用于查询 KPFS 集群信息
+- `ksyun_kpfs_client_install` 数据源，用于获取客户端安装信息
+
+## 1.23.1 (Dec 01, 2025)
+
+IMPROVEMENTS:
+
+- `ksyun_bare_metal`: 新增`roce_cluster`字段，支持RoCE集群配置
+- `ksyun_bare_metals`: 新增`roce_cluster`字段，支持查询RoCE集群信息
+- `ksyun_bare_metal`: 新增`storage_roce_cluster`字段，支持SRoCE集群配置
+- `ksyun_bare_metals`: 新增`storage_roce_cluster`字段，支持查询SRoCE集群信息
+
 ## 1.23.0 (Nov 11, 2025)
 
 FEATURES:
@@ -1027,15 +1110,18 @@ DATA SOURCES:
 
 RESOURCES:
 
-- iam user create
-- iam user read
-- iam user delete
-- iam role create
-- iam role read
-- iam role delete
-- iam group create
-- iam group read
-- iam group delete
-- iam policy create
-- iam policy read
-- iam policy delete
+* iam user create
+* iam user read
+* iam user delete
+* iam role create
+* iam role read
+* iam role delete
+* iam group create
+* iam group read
+* iam group delete
+* iam policy create
+* iam policy read
+* iam policy delete
+
+
+

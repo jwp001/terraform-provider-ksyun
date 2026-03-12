@@ -63,7 +63,7 @@ func resourceKsyunVolume() *schema.Resource {
 			"volume_type": {
 				Type:     schema.TypeString,
 				Optional: true,
-				ForceNew: true,
+				ForceNew: false,
 				ValidateFunc: validation.StringInSlice([]string{
 					// "SSD2.0",
 					// "SSD3.0",
@@ -75,6 +75,8 @@ func resourceKsyunVolume() *schema.Resource {
 					"ESSD_PL1",
 					"ESSD_PL2",
 					"ESSD_PL3",
+					"ESSD_Entry",
+					"ESSD_AutoPL",
 				}, false),
 				Default:     "SSD3.0",
 				Description: "The type of the EBS volume. Valid values:ESSD_PL0/ESSD_PL1/ESSD_PL2/ESSD_PL3/SSD3.0/EHDD, default is `SSD3.0`.",
