@@ -312,6 +312,10 @@ func (s *VpcService) ReadVpc(d *schema.ResourceData, vpcId string) (data map[str
 func (s *VpcService) ReadAndSetVpc(d *schema.ResourceData, r *schema.Resource) (err error) {
 	data, err := s.ReadVpc(d, "")
 	if err != nil {
+		if notFoundError(err) {
+			d.SetId("")
+			return nil
+		}
 		return err
 	}
 	SdkResponseAutoResourceData(d, r, data, nil)
@@ -553,6 +557,10 @@ func (s *VpcService) ReadSubnet(d *schema.ResourceData, subnetId string) (data m
 func (s *VpcService) ReadAndSetSubnet(d *schema.ResourceData, r *schema.Resource) (err error) {
 	data, err := s.ReadSubnet(d, "")
 	if err != nil {
+		if notFoundError(err) {
+			d.SetId("")
+			return nil
+		}
 		return err
 	}
 	extra := map[string]SdkResponseMapping{
@@ -814,6 +822,10 @@ func (s *VpcService) ReadRoute(d *schema.ResourceData, subnetId string) (data ma
 func (s *VpcService) ReadAndSetRoute(d *schema.ResourceData, r *schema.Resource) (err error) {
 	data, err := s.ReadRoute(d, "")
 	if err != nil {
+		if notFoundError(err) {
+			d.SetId("")
+			return nil
+		}
 		return err
 	}
 	SdkResponseAutoResourceData(d, r, data, nil)
@@ -1065,11 +1077,12 @@ func (s *VpcService) ReadAndSetNat(d *schema.ResourceData, r *schema.Resource) (
 	return resource.Retry(5*time.Minute, func() *resource.RetryError {
 		data, callErr := s.ReadNat(d, "")
 		if callErr != nil {
-			if !d.IsNewResource() {
-				return resource.NonRetryableError(callErr)
-			}
+			// if !d.IsNewResource() {
+			// 	return resource.NonRetryableError(callErr)
+			// }
 			if notFoundError(callErr) {
-				return resource.RetryableError(callErr)
+				d.SetId("")
+				return nil
 			} else {
 				return resource.NonRetryableError(fmt.Errorf("error on  reading nat %q, %s", d.Id(), callErr))
 			}
@@ -1159,6 +1172,38 @@ func (s *VpcService) ModifyNatCall(d *schema.ResourceData, r *schema.Resource) (
 				return err
 			},
 		}
+	}
+	return callback, err
+}
+
+// modifyNatGatewayBillingCall 修改NAT网关计费方式
+func (s *VpcService) modifyNatGatewayBillingCall(d *schema.ResourceData, _ *schema.Resource) (callback ApiCall, err error) {
+	// 判断 charge_type 是否变化，无变化则不调用接口
+	if !d.HasChange("charge_type") {
+		return
+	}
+	// 获取计费方式
+	chargeType := d.Get("charge_type").(string)
+	// 构建请求参数
+	req := map[string]interface{}{
+		"InstanceType": "nat",
+		"InstanceId":   d.Id(),
+		"ChargeType":   chargeType,
+	}
+
+	callback = ApiCall{
+		param:  &req,
+		action: "ModifyNatGatewayBilling",
+		executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+			conn := client.vpcconn
+			logger.Debug(logger.RespFormat, call.action, *(call.param))
+			resp, err = conn.ModifyNatGatewayBilling(call.param)
+			return resp, err
+		},
+		afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+			logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+			return err
+		},
 	}
 	return callback, err
 }
@@ -1287,6 +1332,13 @@ func (s *VpcService) ModifyNat(d *schema.ResourceData, r *schema.Resource) (err 
 		return err
 	}
 	apiProcess.PutCalls(tagsCall)
+
+	billingCall, err := s.modifyNatGatewayBillingCall(d, r)
+	if err != nil {
+		return err
+	}
+	apiProcess.PutCalls(billingCall)
+
 	return apiProcess.Run()
 }
 
@@ -1838,6 +1890,10 @@ func (s *VpcService) ReadAndSetNetworkAcls(d *schema.ResourceData, r *schema.Res
 func (s *VpcService) ReadAndSetNetworkAcl(d *schema.ResourceData, r *schema.Resource) (err error) {
 	data, err := s.ReadNetworkAcl(d, "")
 	if err != nil {
+		if notFoundError(err) {
+			d.SetId("")
+			return nil
+		}
 		return err
 	}
 	extra := map[string]SdkResponseMapping{
@@ -2549,6 +2605,10 @@ func (s *VpcService) ReadAndSetSecurityGroups(d *schema.ResourceData, r *schema.
 func (s *VpcService) ReadAndSetSecurityGroup(d *schema.ResourceData, r *schema.Resource) (err error) {
 	data, err := s.ReadSecurityGroup(d, "")
 	if err != nil {
+		if notFoundError(err) {
+			d.SetId("")
+			return nil
+		}
 		return err
 	}
 	extra := map[string]SdkResponseMapping{
@@ -3209,11 +3269,12 @@ func (s *VpcService) ReadAndSetVpnGateway(d *schema.ResourceData, r *schema.Reso
 	return resource.Retry(5*time.Minute, func() *resource.RetryError {
 		data, callErr := s.ReadVpnGateway(d, "")
 		if callErr != nil {
-			if !d.IsNewResource() {
-				return resource.NonRetryableError(callErr)
-			}
+			// if !d.IsNewResource() {
+			// 	return resource.NonRetryableError(callErr)
+			// }
 			if notFoundError(callErr) {
-				return resource.RetryableError(callErr)
+				d.SetId("")
+				return nil
 			} else {
 				return resource.NonRetryableError(callErr)
 			}
@@ -3435,6 +3496,10 @@ func (s *VpcService) ReadVpnCustomerGateway(d *schema.ResourceData, vpnCustomerG
 func (s *VpcService) ReadAndSetVpnCustomerGateway(d *schema.ResourceData, r *schema.Resource) (err error) {
 	data, err := s.ReadVpnCustomerGateway(d, "")
 	if err != nil {
+		if notFoundError(err) {
+			d.SetId("")
+			return nil
+		}
 		return err
 	}
 	SdkResponseAutoResourceData(d, r, data, nil)
@@ -3641,6 +3706,10 @@ func (s *VpcService) ReadVpnTunnel(d *schema.ResourceData, vpnTunnelId string) (
 func (s *VpcService) ReadAndSetVpnTunnel(d *schema.ResourceData, r *schema.Resource) (err error) {
 	data, err := s.ReadVpnTunnel(d, "")
 	if err != nil {
+		if notFoundError(err) {
+			d.SetId("")
+			return nil
+		}
 		return err
 	}
 	extra := map[string]SdkResponseMapping{
@@ -4050,4 +4119,204 @@ func (s *VpcService) ModifyNetworkInterfaceSecondaryInfraIpCall(d *schema.Resour
 var logCall = func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
 	logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
 	return err
+}
+
+func (s *VpcService) ReadAndSetVpcIpv6Addresses(d *schema.ResourceData, r *schema.Resource) (err error) {
+	transform := map[string]SdkReqTransform{
+		"ids": {
+			mapping: "Ipv6PublicIpAddressId",
+			Type:    TransformWithN,
+		},
+		"network_interface_id": {
+			mapping: "network-interface-id",
+			Type:    TransformWithFilter,
+		},
+	}
+	req, err := mergeDataSourcesReq(d, r, transform)
+	if err != nil {
+		return err
+	}
+	data, err := s.ReadVpcIpv6Addresses(req)
+	if err != nil {
+		return err
+	}
+
+	return mergeDataSourcesResp(d, r, ksyunDataSource{
+		collection:  data,
+		idFiled:     "Ipv6PublicIpAddressId",
+		targetField: "ipv6_public_ip_addresses",
+	})
+}
+
+func (s *VpcService) ReadVpcIpv6Addresses(condition map[string]interface{}) (data []interface{}, err error) {
+	var (
+		resp    *map[string]interface{}
+		results interface{}
+	)
+	conn := s.client.vpcconn
+	action := "DescribeIpv6PublicIpAddresses"
+	logger.Debug(logger.ReqFormat, action, condition)
+	if condition == nil {
+		resp, err = conn.DescribeIpv6PublicIpAddresses(nil)
+		if err != nil {
+			return data, err
+		}
+	} else {
+		resp, err = conn.DescribeIpv6PublicIpAddresses(&condition)
+		if err != nil {
+			return data, err
+		}
+	}
+
+	results, err = getSdkValue("Ipv6PublicIpAddressSet", *resp)
+	if err != nil {
+		return data, err
+	}
+	data = results.([]interface{})
+	return data, err
+}
+
+func (s *VpcService) CreateVpcIpv6Address(d *schema.ResourceData, r *schema.Resource) (err error) {
+	call, err := s.CreateVpcIpv6AddressCall(d, r)
+	if err != nil {
+		return err
+	}
+	return ksyunApiCallNew([]ApiCall{call}, d, s.client, true)
+}
+
+func (s *VpcService) CreateVpcIpv6AddressCall(d *schema.ResourceData, r *schema.Resource) (callback ApiCall, err error) {
+	req, err := SdkRequestAutoMapping(d, r, false, nil, nil)
+	if err != nil {
+		return callback, err
+	}
+	callback = ApiCall{
+		param:  &req,
+		action: "CreateIpv6PublicIp",
+		executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+			conn := client.vpcconn
+			logger.Debug(logger.RespFormat, call.action, *(call.param))
+			resp, err = conn.CreateIpv6PublicIp(call.param)
+			return resp, err
+		},
+		afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+			logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+			id, err := getSdkValue("Ipv6PublicIpAddress.Ipv6PublicIpAddressId", *resp)
+			if err != nil {
+				return err
+			}
+			d.SetId(id.(string))
+			return err
+		},
+	}
+	return callback, err
+}
+
+func (s *VpcService) ReadAndSetVpcIpv6Address(d *schema.ResourceData, r *schema.Resource) (err error) {
+	data, err := s.ReadVpcIpv6Address(d, "")
+	if err != nil {
+		return err
+	}
+	SdkResponseAutoResourceData(d, r, data, nil)
+	return err
+}
+
+func (s *VpcService) ReadVpcIpv6Address(d *schema.ResourceData, ipv6PublicIpAddressId string) (data map[string]interface{}, err error) {
+	var results []interface{}
+	if ipv6PublicIpAddressId == "" {
+		ipv6PublicIpAddressId = d.Id()
+	}
+	req := map[string]interface{}{
+		"Ipv6PublicIpAddressId.1": ipv6PublicIpAddressId,
+	}
+	results, err = s.ReadVpcIpv6Addresses(req)
+	if err != nil {
+		return data, err
+	}
+	for _, v := range results {
+		data = v.(map[string]interface{})
+
+	}
+	if len(data) == 0 {
+		return data, fmt.Errorf("VpcIpv6PublicIpAddress %s not exist ", ipv6PublicIpAddressId)
+	}
+	return data, err
+}
+
+func (s *VpcService) ModifyVpcIpv6Address(d *schema.ResourceData, r *schema.Resource) (err error) {
+	call, err := s.ModifyVpcIpv6AddressCall(d, r)
+	if err != nil {
+		return err
+	}
+	return ksyunApiCallNew([]ApiCall{call}, d, s.client, true)
+}
+
+func (s *VpcService) ModifyVpcIpv6AddressCall(d *schema.ResourceData, r *schema.Resource) (callback ApiCall, err error) {
+	req, err := SdkRequestAutoMapping(d, r, true, nil, nil)
+	if err != nil {
+		return callback, err
+	}
+	if len(req) > 0 {
+		req["Ipv6PublicIpAddressId"] = d.Id()
+		callback = ApiCall{
+			param:  &req,
+			action: "ModifyIpv6PublicIp",
+			executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+				conn := client.vpcconn
+				logger.Debug(logger.RespFormat, call.action, *(call.param))
+				resp, err = conn.ModifyIpv6PublicIp(call.param)
+				return resp, err
+			},
+			afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+				logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+				return err
+			},
+		}
+	}
+	return callback, err
+}
+
+func (s *VpcService) RemoveVpcIpv6Address(d *schema.ResourceData) (err error) {
+	call, err := s.RemoveVpcIpv6AddressCall(d)
+	if err != nil {
+		return err
+	}
+	return ksyunApiCallNew([]ApiCall{call}, d, s.client, true)
+}
+
+func (s *VpcService) RemoveVpcIpv6AddressCall(d *schema.ResourceData) (callback ApiCall, err error) {
+	removeReq := map[string]interface{}{
+		"Ipv6PublicIpAddressId": d.Id(),
+	}
+	callback = ApiCall{
+		param:  &removeReq,
+		action: "ReleaseIpv6PublicIp",
+		executeCall: func(d *schema.ResourceData, client *KsyunClient, call ApiCall) (resp *map[string]interface{}, err error) {
+			conn := client.vpcconn
+			logger.Debug(logger.RespFormat, call.action, *(call.param))
+			resp, err = conn.ReleaseIpv6PublicIp(call.param)
+			return resp, err
+		},
+		callError: func(d *schema.ResourceData, client *KsyunClient, call ApiCall, baseErr error) error {
+			return resource.Retry(15*time.Minute, func() *resource.RetryError {
+				_, callErr := s.ReadVpcIpv6Address(d, "")
+				if callErr != nil {
+					if notFoundError(callErr) {
+						return nil
+					} else {
+						return resource.NonRetryableError(fmt.Errorf("error on  reading vpc ipv6 address when delete %q, %s", d.Id(), callErr))
+					}
+				}
+				_, callErr = call.executeCall(d, client, call)
+				if callErr == nil {
+					return nil
+				}
+				return resource.RetryableError(callErr)
+			})
+		},
+		afterCall: func(d *schema.ResourceData, client *KsyunClient, resp *map[string]interface{}, call ApiCall) (err error) {
+			logger.Debug(logger.RespFormat, call.action, *(call.param), *resp)
+			return err
+		},
+	}
+	return callback, err
 }
